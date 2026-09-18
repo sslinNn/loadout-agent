@@ -2,10 +2,8 @@
 
 CLI/daemon that scans and manages Claude Code and Codex skills/MCP servers on one machine.
 
-## Packages
-
-- `loadout-agent` — published CLI (`npm i -g loadout-agent`)
-- `@loadout/shared` — zod schemas + row mappers shared with the [loadout](https://github.com/sslinNn/loadout) dashboard
+Contracts (`@loadout/shared`) live in [sslinNn/loadout-shared](https://github.com/sslinNn/loadout-shared).
+The web dashboard is [sslinNn/loadout](https://github.com/sslinNn/loadout).
 
 ## Develop
 
@@ -17,5 +15,6 @@ npm test
 
 ## Publish
 
-- Agent: push tag `loadout-agent-v*` (see `.github/workflows/publish-agent.yml`)
-- Shared: push tag `shared-v*` (see `.github/workflows/publish-shared.yml`)
+Push tag `loadout-agent-v*` (see `.github/workflows/publish-agent.yml`).
+
+npm Trusted Publisher for this package must point at **this** repository (not the old monorepo).
