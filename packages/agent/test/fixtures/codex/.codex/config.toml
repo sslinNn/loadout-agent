@@ -1,0 +1,11 @@
+[mcp_servers.fixture-server]
+command = "node"
+args = ["server.js"]
+
+[[skills.config]]
+name = "example-skill"
+enabled = true
+
+[[skills.config]]
+name = "disabled-skill"
+enabled = false

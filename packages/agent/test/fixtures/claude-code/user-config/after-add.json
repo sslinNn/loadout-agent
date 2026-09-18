@@ -1,0 +1,3 @@
+{
+  "_comment": "Placeholder fixture — deferred (Task 4 spike not run). The live experiment that would have populated this file (running `claude mcp add --scope user loadout-spike-test -- echo hello` against a real ~/.claude and capturing the changed file) was skipped because ~/.claude on this machine is the live config of the Claude Code session implementing this project. See packages/agent/src/scanners/claudeCode.ts for the full explanation. TODO: fill in on a real device pass, on a disposable/test ~/.claude only."
+}
