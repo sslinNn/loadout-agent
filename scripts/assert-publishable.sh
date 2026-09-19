@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The tarball a user gets from `npm i -g loadout-agent` must resolve without
+# The tarball a user gets from `npm i -g loadout-agen` must resolve without
 # a sibling checkout or a git clone of loadout-shared.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -7,13 +7,17 @@ cd "$(dirname "$0")/.."
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-tgz=$(npm pack -w loadout-agent --pack-destination "$tmp" --silent | tail -n1)
+tgz=$(npm pack -w loadout-agen --pack-destination "$tmp" --silent | tail -n1)
 tar -xOf "$tmp/$tgz" package/package.json > "$tmp/pkg.json"
 tar -xOf "$tmp/$tgz" package/dist/cli.js > "$tmp/cli.js"
 
 PKG_JSON="$tmp/pkg.json" node --input-type=module <<'JS'
 import { readFileSync } from "node:fs";
 const p = JSON.parse(readFileSync(process.env.PKG_JSON, "utf8"));
+if (p.name !== "loadout-agen") {
+  console.error(`expected package name loadout-agen, got: ${p.name}`);
+  process.exit(1);
+}
 for (const [name, spec] of Object.entries(p.dependencies ?? {})) {
   if (/^(file:|github:|git\+)/.test(String(spec))) {
     console.error(`runtime dependency ${name} is ${spec}; npm i -g would need git`);

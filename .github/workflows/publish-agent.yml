@@ -1,7 +1,7 @@
-name: Publish loadout-agent
+name: Publish loadout-agen
 on:
   push:
-    tags: ["loadout-agent-v*"]
+    tags: ["loadout-agen-v*"]
   workflow_dispatch:
 permissions:
   contents: read
@@ -30,4 +30,4 @@ jobs:
             printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > "$HOME/.npmrc"
             chmod 600 "$HOME/.npmrc"
           fi
-          npm publish -w loadout-agent --access public
+          npm publish -w loadout-agen --access public
