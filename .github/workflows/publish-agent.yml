@@ -53,4 +53,4 @@ jobs:
           else
             unset NPM_TOKEN
           fi
-          npm publish -w loadout-agent --access public
+          npm publish -w loadout-agent --access public --loglevel verbose
