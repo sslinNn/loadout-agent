@@ -5,8 +5,8 @@
     "packages/agent"
   ],
   "scripts": {
-    "build": "npm run build --workspace=loadout-agen",
-    "test": "npm test --workspace=loadout-agen"
+    "build": "npm run build --workspace=loadout-agent",
+    "test": "npm test --workspace=loadout-agent"
   },
   "devDependencies": {
     "@types/node": "^20",

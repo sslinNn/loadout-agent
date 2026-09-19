@@ -3,7 +3,7 @@
  *
  * The env vars are an override for anyone pointing an agent at a local or self-hosted
  * Supabase project — which is what the local dev loop uses. Otherwise it falls back to
- * `@loadout/shared`'s bundled production values, so `npm i -g loadout-agen && loadout pair`
+ * `@loadout/shared`'s bundled production values, so `npm i -g loadout-agent && loadout pair`
  * works with no environment setup.
  */
 import { BUNDLED_SUPABASE_URL, BUNDLED_SUPABASE_ANON_KEY } from "@loadout/shared";
