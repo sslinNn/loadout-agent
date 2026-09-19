@@ -1,7 +1,7 @@
 // Bundles the CLI entrypoint into a single dist/cli.js with @loadout/shared inlined.
-// @loadout/shared is a workspace-only package (never published to npm) — a plain
-// "dependencies" entry would leave a real `npm i -g loadout-agent` unable to resolve it, so
-// its source is bundled in directly and every genuinely-external npm package stays external.
+// @loadout/shared is a GitHub-pinned build-time package, not an npm runtime dep —
+// listing it under dependencies would make `npm i -g loadout-agent` clone git. Keep
+// it in devDependencies; esbuild inlines it and every genuine npm package stays external.
 import { build } from "esbuild";
 
 await build({
