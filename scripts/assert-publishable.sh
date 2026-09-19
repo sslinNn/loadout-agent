@@ -14,6 +14,10 @@ tar -xOf "$tmp/$tgz" package/dist/cli.js > "$tmp/cli.js"
 PKG_JSON="$tmp/pkg.json" node --input-type=module <<'JS'
 import { readFileSync } from "node:fs";
 const p = JSON.parse(readFileSync(process.env.PKG_JSON, "utf8"));
+if (p.name !== "loadout-agent") {
+  console.error(`expected package name loadout-agent, got: ${p.name}`);
+  process.exit(1);
+}
 for (const [name, spec] of Object.entries(p.dependencies ?? {})) {
   if (/^(file:|github:|git\+)/.test(String(spec))) {
     console.error(`runtime dependency ${name} is ${spec}; npm i -g would need git`);
