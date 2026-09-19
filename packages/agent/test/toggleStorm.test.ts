@@ -129,19 +129,18 @@ describe("one dashboard toggle", () => {
     await sleep(300);
     writes.length = 0;
 
-    // Exactly what mutators/claudeCode.ts does to disable a skill.
-    const disabledDir = path.join(home, ".claude", ".loadout-disabled");
-    mkdirSync(disabledDir, { recursive: true });
-    renameSync(noisy, path.join(disabledDir, "noisy"));
+    // Exactly what the unified skill mutator does to disable: park in loadout's store.
+    const parked = path.join(home, ".loadout", "disabled-skills", "global");
+    mkdirSync(parked, { recursive: true });
+    renameSync(noisy, path.join(parked, "noisy"));
 
     await sleep(900);
 
     expect(rescans).toBe(1);
     expect(writes).toHaveLength(1);
     expect(writes[0].op).toBe("update");
-    // The two untouched skills are not news and are not written; the toggled one is, and its
-    // stored row now says so.
-    expect(writes[0].ids).toEqual([`claude_code:skill:global:${path.join(skillsDir, "noisy")}`]);
+    const noisyId = `skill:global:${path.join(home, ".agents", "skills", "noisy")}`;
+    expect(writes[0].ids).toEqual([noisyId]);
     expect(rows.get(writes[0].ids[0])!.enabled).toBe(false);
     expect(rows.size).toBe(3); // the disabled skill is still inventoried, not deleted
 

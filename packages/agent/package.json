@@ -1,7 +1,7 @@
 {
   "name": "loadout-agent",
   "version": "0.1.2",
-  "description": "Loadout agent: scans and manages Claude Code and Codex skills and MCP servers on one machine.",
+  "description": "Loadout agent: scans and manages skills and MCP servers across detected coding-agent harnesses on one machine.",
   "type": "module",
   "repository": {
     "type": "git",
@@ -31,7 +31,7 @@
     "@iarna/toml": "^2.2.5",
     "node-notifier": "^10.0.1",
     "zod": "^3.23.0",
-    "@loadout/shared": "github:sslinNn/loadout-shared"
+    "@loadout/shared": "github:sslinNn/loadout-shared#e19b2bd00c76278927fec4c7b64785ad3f29c7cb"
   },
   "devDependencies": {
     "esbuild": "^0.21.5",

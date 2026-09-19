@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, it, expect, vi } from "vitest";
@@ -26,6 +26,7 @@ describe("captureContentBackup", () => {
 describe("backupContentFor", () => {
   it("backs up only the named MCP server, never the whole config file", () => {
     const home = mkdtempSync(path.join(tmpdir(), "loadout-mcp-backup-"));
+    mkdirSync(path.join(home, ".claude"), { recursive: true });
     const configPath = path.join(home, ".claude.json");
     writeFileSync(
       configPath,
@@ -35,21 +36,25 @@ describe("backupContentFor", () => {
       })
     );
 
-    const captured = backupContentFor({
-      id: `claude_code:mcp:global:${configPath}:supabird`,
-      machineId: "m",
-      tool: "claude_code",
-      kind: "mcp",
-      name: "supabird",
-      enabled: true,
-      path: configPath,
-      scope: "global",
-      projectPath: null,
-      sourceType: "manual",
-      sourceRef: null,
-      contentBackupId: null,
-      lastSyncedAt: new Date().toISOString()
-    } as InstalledItem);
+    const captured = backupContentFor(
+      {
+        id: "mcp:global:supabird",
+        machineId: "m",
+        harnesses: ["claude_code"],
+        kind: "mcp",
+        name: "supabird",
+        enabled: true,
+        path: "global::supabird",
+        scope: "global",
+        projectPath: null,
+        sourceType: "manual",
+        sourceRef: null,
+        sourceSubdir: null,
+        contentBackupId: null,
+        lastSyncedAt: new Date().toISOString()
+      } as InstalledItem,
+      home
+    );
 
     expect(captured).toContain("example.invalid");
     expect(captured).not.toContain("must-not-leak");

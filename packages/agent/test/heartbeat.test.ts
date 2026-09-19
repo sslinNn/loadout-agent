@@ -1,4 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { startHeartbeat } from "../src/heartbeat";
 import { readPackageVersion } from "../src/version";
 
@@ -32,5 +35,21 @@ describe("startHeartbeat", () => {
     await Promise.resolve();
     expect(update).toHaveBeenCalledWith(expect.objectContaining({ agent_version: readPackageVersion() }));
     handle.stop();
+  });
+
+  it("reports the harnesses present on the machine so the dashboard can compute honest partial", async () => {
+    const home = mkdtempSync(path.join(tmpdir(), "loadout-hb-harness-"));
+    mkdirSync(path.join(home, ".claude"), { recursive: true });
+    mkdirSync(path.join(home, ".cursor"), { recursive: true });
+    const update = vi.fn().mockReturnValue({ eq: vi.fn().mockResolvedValue({ error: null }) });
+    const client = { from: () => ({ update }) } as any;
+
+    const handle = startHeartbeat(client, "M1", { intervalMs: 10_000, homeDir: home });
+    await Promise.resolve();
+    expect(update).toHaveBeenCalledWith(
+      expect.objectContaining({ present_harnesses: expect.arrayContaining(["claude_code", "cursor"]) })
+    );
+    handle.stop();
+    rmSync(home, { recursive: true, force: true });
   });
 });

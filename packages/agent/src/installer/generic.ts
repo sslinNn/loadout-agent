@@ -4,12 +4,16 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "no
 import path from "node:path";
 import os from "node:os";
 import { nextConfirmationId, requestLocalConfirmation } from "./confirm.js";
+import { fromVendor, mcpFingerprint, type CanonicalMcp } from "../harnesses/canonicalMcp.js";
+import { presentAdapters } from "../harnesses/registry.js";
+import { readJsonObject } from "../harnesses/jsonFile.js";
+import { projectSkillToPresentHarnesses } from "../skills/project.js";
+import { agentsSkillsDir } from "../skills/store.js";
 
 const execFileAsync = promisify(execFile);
 
 export interface InstallSource { type: "git" | "npm" | "url"; ref: string; subdir?: string | null }
 export interface InstallTarget {
-  tool: "claude_code" | "codex";
   kind: "skill" | "mcp";
   scope: "global" | "project";
   projectPath: string | null;
@@ -27,29 +31,11 @@ export interface InstallStrategies {
 
 function skillsDirFor(target: InstallTarget): string {
   const root = target.scope === "global" ? (target.homeDir ?? os.homedir()) : target.projectPath!;
-  const dirName = target.tool === "claude_code" ? ".claude" : ".agents";
-  return path.join(root, dirName, "skills");
+  return agentsSkillsDir(root);
 }
 
-// The repository's own name, used both as the scratch clone directory and — when no
-// subdirectory is named — as the installed skill's identity on disk. Deriving it from the
-// ref rather than from the scratch path keeps a root-is-the-skill repository landing at
-// <skills>/<repo> exactly as it did before the temp-clone rework.
 function repoNameFrom(ref: string): string {
   return path.basename(ref).replace(/\.git$/, "") || "repo";
-}
-
-/**
- * Where an installed artifact of a given kind belongs, or null when this installer has
- * no honest destination for it.
- *
- * "mcp" has none: an MCP server is an entry inside a config file, not a directory of
- * files. This used to throw — which meant the caller learned about it as an unhandled
- * command error rather than a reason it could log and show.
- */
-function installDirFor(target: InstallTarget): string | null {
-  if (target.kind === "mcp") return null;
-  return skillsDirFor(target);
 }
 
 async function defaultGitClone(ref: string, destDir: string): Promise<string> {
@@ -57,34 +43,85 @@ async function defaultGitClone(ref: string, destDir: string): Promise<string> {
   return destDir;
 }
 
+function asMap(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function readMcpManifest(dir: string): Record<string, CanonicalMcp> | null {
+  for (const file of ["mcp.json", ".mcp.json"]) {
+    const filePath = path.join(dir, file);
+    if (!existsSync(filePath)) continue;
+    const parsed = readJsonObject(filePath);
+    const wrapped = { ...asMap(parsed.mcpServers), ...asMap(parsed.servers) };
+    const fromWrapped = Object.fromEntries(
+      Object.entries(wrapped).map(([name, raw]) => [name, fromVendor(raw)])
+    );
+    const usable = Object.fromEntries(
+      Object.entries(fromWrapped).filter(([, entry]) => Boolean(entry.command || entry.url))
+    );
+    if (Object.keys(usable).length > 0) return usable;
+    const single = fromVendor(parsed);
+    if (single.command || single.url) {
+      return { [path.basename(dir)]: single };
+    }
+  }
+  return null;
+}
+
+function writeMcpToPresent(opts: {
+  homeDir: string;
+  scope: "global" | "project";
+  projectPath: string | null;
+  servers: Record<string, CanonicalMcp>;
+}): { name: string | null; reason?: string } {
+  const adapters = presentAdapters(opts.homeDir);
+  if (adapters.length === 0) {
+    return { name: null, reason: "no live harness is present to receive this MCP server" };
+  }
+  let first: string | null = null;
+  let wrote = false;
+  let skippedConflict = false;
+  for (const [name, entry] of Object.entries(opts.servers)) {
+    first ??= name;
+    for (const adapter of adapters) {
+      const live =
+        opts.scope === "project" && opts.projectPath
+          ? (adapter.readProjectMcp?.(opts.projectPath) ?? {})[name]
+          : adapter.readMcp(opts.homeDir)[name];
+      if (live && mcpFingerprint(live) !== mcpFingerprint(entry)) {
+        skippedConflict = true;
+        continue;
+      }
+      if (opts.scope === "project" && opts.projectPath) {
+        adapter.writeProjectMcpEntry?.(opts.projectPath, name, entry);
+      } else {
+        adapter.writeMcpEntry(opts.homeDir, name, entry);
+      }
+      wrote = true;
+    }
+  }
+  if (!wrote) {
+    return {
+      name: null,
+      reason: skippedConflict
+        ? "every present harness already has this name with a different command or URL"
+        : "no live harness is present to receive this MCP server"
+    };
+  }
+  return { name: first };
+}
+
 export async function installGeneric(
   source: InstallSource,
   target: InstallTarget,
   strategies: InstallStrategies = {}
 ): Promise<{ installed: boolean; path?: string; reason?: string }> {
-  // Resolve the destination BEFORE asking for local confirmation: an unsupported target
-  // (see installDirFor) must fail loudly and immediately rather than prompting the user to
-  // approve an install that could only ever land in the wrong place.
-  const installRoot = installDirFor(target);
-  if (installRoot === null) {
-    return {
-      installed: false,
-      reason:
-        "kind 'mcp' is not installable: an MCP server is a config-file entry " +
-        "(codex config.toml [mcp_servers.*] / claude_code mcpServers), not a directory of files"
-    };
-  }
   if (source.type !== "git") {
     return { installed: false, reason: `source type ${source.type} is not supported yet` };
   }
 
-  // Clone into a temp directory rather than onto the destination. Two reasons: the
-  // interesting content is usually a subdirectory of the repo, and a destination that
-  // already exists must be a reported refusal, not `git clone`'s non-zero exit surfacing
-  // as an unhandled command error.
   const tempRoot = mkdtempSync(path.join(os.tmpdir(), "loadout-install-"));
   try {
-    // "npm" and "url" are refused above, so source.type is "git" here.
     const clone = strategies.gitClone ?? defaultGitClone;
     const repoDir = await clone(source.ref, path.join(tempRoot, repoNameFrom(source.ref)));
 
@@ -96,18 +133,46 @@ export async function installGeneric(
     if (!existsSync(resolved) || !statSync(resolved).isDirectory()) {
       return { installed: false, reason: `${source.subdir} is not a directory in ${source.ref}` };
     }
-    if (!existsSync(path.join(resolved, "SKILL.md"))) {
+
+    const skillMd = existsSync(path.join(resolved, "SKILL.md"));
+    const mcpServers = readMcpManifest(resolved);
+    const asMcp = target.kind === "mcp" || (!skillMd && mcpServers);
+
+    if (asMcp) {
+      if (!mcpServers) {
+        return {
+          installed: false,
+          reason: `${source.subdir ?? "the repository root"} has no mcp.json, so there is nothing to write into harness configs`
+        };
+      }
+      const approved =
+        strategies.skipConfirmation === true ||
+        (await requestLocalConfirmation({
+          id: nextConfirmationId(),
+          description: `Install ${source.ref}${source.subdir ? ` (${source.subdir})` : ""} (${target.scope})`
+        }));
+      if (!approved) return { installed: false, reason: "denied" };
+
+      const written = writeMcpToPresent({
+        homeDir: target.homeDir ?? os.homedir(),
+        scope: target.scope,
+        projectPath: target.projectPath,
+        servers: mcpServers
+      });
+      if (!written.name) {
+        return { installed: false, reason: written.reason };
+      }
+      return { installed: true, path: written.name };
+    }
+
+    if (!skillMd) {
       return {
         installed: false,
         reason: `${source.subdir ?? "the repository root"} has no SKILL.md, so no scanner would report it`
       };
     }
 
-    // The installed directory's basename becomes the skill's identity on disk, and the
-    // subdirectory is the better name: cloning github.com/x/cc-limits with subdir
-    // skills/cc-limits should land at skills/cc-limits, not skills/cc-limits/skills/...
-    // With no subdirectory `resolved` is the clone root, which repoNameFrom already named
-    // after the repository, so the same rule serves both shapes.
+    const installRoot = skillsDirFor(target);
     const destName = path.basename(resolved);
     const destDir = path.join(installRoot, destName);
     if (existsSync(destDir)) {
@@ -118,7 +183,7 @@ export async function installGeneric(
       strategies.skipConfirmation === true ||
       (await requestLocalConfirmation({
         id: nextConfirmationId(),
-        description: `Install ${source.ref}${source.subdir ? ` (${source.subdir})` : ""} into ${target.tool} (${target.scope})`
+        description: `Install ${source.ref}${source.subdir ? ` (${source.subdir})` : ""} (${target.scope})`
       }));
     if (!approved) return { installed: false, reason: "denied" };
 
@@ -126,6 +191,11 @@ export async function installGeneric(
     cpSync(resolved, destDir, {
       recursive: true,
       filter: (src) => path.basename(src) !== ".git"
+    });
+    projectSkillToPresentHarnesses({
+      homeDir: target.homeDir ?? os.homedir(),
+      canonicalPath: destDir,
+      projectPath: target.projectPath
     });
     return { installed: true, path: destDir };
   } finally {

@@ -30,13 +30,13 @@ describe("installGeneric", () => {
 
     const result = await installGeneric(
       { type: "git", ref: "https://github.com/example/skill.git" },
-      { tool: "claude_code", kind: "skill", scope: "global", projectPath: null, homeDir: home },
+      { kind: "skill", scope: "global", projectPath: null, homeDir: home },
       { gitClone: clone }
     );
 
     expect(result).toEqual({ installed: false, reason: "denied" });
     // The clone lands in a temp directory; nothing may reach the install destination.
-    expect(existsSync(path.join(home, ".claude"))).toBe(false);
+    expect(existsSync(path.join(home, ".agents"))).toBe(false);
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -47,7 +47,7 @@ describe("installGeneric", () => {
 
     const result = await installGeneric(
       { type: "git", ref: "https://github.com/example/skill.git" },
-      { tool: "claude_code", kind: "skill", scope: "global", projectPath: null, homeDir: home },
+      { kind: "skill", scope: "global", projectPath: null, homeDir: home },
       { gitClone: clone }
     );
 
@@ -55,28 +55,21 @@ describe("installGeneric", () => {
     const [clonedRef, clonedDest] = clone.mock.calls[0];
     expect(clonedRef).toBe("https://github.com/example/skill.git");
     // Cloned to a scratch directory, not straight onto the destination.
-    expect(clonedDest.startsWith(path.join(home, ".claude"))).toBe(false);
-    expect(result).toMatchObject({ installed: true, path: path.join(home, ".claude", "skills", "skill") });
+    expect(clonedDest.startsWith(path.join(home, ".agents"))).toBe(false);
+    expect(result).toMatchObject({ installed: true, path: path.join(home, ".agents", "skills", "skill") });
     rmSync(home, { recursive: true, force: true });
   });
 
-  it("installs a skill into the tool's skills directory (claude_code -> .claude/skills, codex -> .agents/skills)", async () => {
+  it("installs a skill into the canonical .agents/skills directory", async () => {
     vi.spyOn(confirmModule, "requestLocalConfirmation").mockResolvedValue(true);
     const proj = mkdtempSync(path.join(tmpdir(), "loadout-install-proj-"));
 
-    const codex = await installGeneric(
+    const installed = await installGeneric(
       { type: "git", ref: "https://github.com/example/skill.git" },
-      { tool: "codex", kind: "skill", scope: "project", projectPath: proj },
+      { kind: "skill", scope: "project", projectPath: proj },
       { gitClone: fakeClone(BARE_SKILL) }
     );
-    expect(codex).toMatchObject({ installed: true, path: path.join(proj, ".agents", "skills", "skill") });
-
-    const claudeCode = await installGeneric(
-      { type: "git", ref: "https://github.com/example/skill.git" },
-      { tool: "claude_code", kind: "skill", scope: "project", projectPath: proj },
-      { gitClone: fakeClone(BARE_SKILL) }
-    );
-    expect(claudeCode).toMatchObject({ installed: true, path: path.join(proj, ".claude", "skills", "skill") });
+    expect(installed).toMatchObject({ installed: true, path: path.join(proj, ".agents", "skills", "skill") });
 
     rmSync(proj, { recursive: true, force: true });
   });
@@ -85,21 +78,104 @@ describe("installGeneric", () => {
     const confirm = vi.spyOn(confirmModule, "requestLocalConfirmation").mockResolvedValue(true);
     const result = await installGeneric(
       { type: "npm", ref: "some-package" },
-      { tool: "claude_code", kind: "skill", scope: "global", projectPath: null }
+      { kind: "skill", scope: "global", projectPath: null }
     );
     expect(result).toEqual({ installed: false, reason: "source type npm is not supported yet" });
     expect(confirm).not.toHaveBeenCalled();
   });
 
-  it("refuses an mcp target without prompting", async () => {
-    const confirm = vi.spyOn(confirmModule, "requestLocalConfirmation").mockResolvedValue(true);
+  it("writes canonical MCP into every present harness config", async () => {
+    vi.spyOn(confirmModule, "requestLocalConfirmation").mockResolvedValue(true);
+    const home = mkdtempSync(path.join(tmpdir(), "loadout-install-mcp-"));
+    mkdirSync(path.join(home, ".claude"), { recursive: true });
+    mkdirSync(path.join(home, ".cursor"), { recursive: true });
+    const clone = fakeClone({
+      "mcp.json": JSON.stringify({
+        mcpServers: { github: { command: "npx", args: ["-y", "@modelcontextprotocol/server-github"] } }
+      })
+    });
+
     const result = await installGeneric(
-      { type: "git", ref: "https://github.com/example/server.git" },
-      { tool: "claude_code", kind: "mcp", scope: "global", projectPath: null }
+      { type: "git", ref: "https://github.com/example/github-mcp.git" },
+      { kind: "mcp", scope: "global", projectPath: null, homeDir: home },
+      { gitClone: clone }
     );
-    expect(result.installed).toBe(false);
-    expect(result.reason).toContain("mcp");
-    expect(confirm).not.toHaveBeenCalled();
+
+    expect(result).toMatchObject({ installed: true, path: "github" });
+    expect(JSON.parse(readFileSync(path.join(home, ".claude.json"), "utf8")).mcpServers.github.command).toBe("npx");
+    expect(JSON.parse(readFileSync(path.join(home, ".cursor", "mcp.json"), "utf8")).mcpServers.github.command).toBe("npx");
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("installs a git MCP listing whose mcp.json lives in a subdirectory", async () => {
+    vi.spyOn(confirmModule, "requestLocalConfirmation").mockResolvedValue(true);
+    const home = mkdtempSync(path.join(tmpdir(), "loadout-install-mcp-subdir-"));
+    mkdirSync(path.join(home, ".claude"), { recursive: true });
+    mkdirSync(path.join(home, ".cursor"), { recursive: true });
+    const clone = fakeClone({
+      "packages/github-mcp/mcp.json": JSON.stringify({
+        mcpServers: { github: { command: "npx", args: ["-y", "@modelcontextprotocol/server-github"] } }
+      })
+    });
+
+    const result = await installGeneric(
+      { type: "git", ref: "https://github.com/example/monorepo.git", subdir: "packages/github-mcp" },
+      { kind: "mcp", scope: "global", projectPath: null, homeDir: home },
+      { gitClone: clone }
+    );
+
+    expect(result).toMatchObject({ installed: true, path: "github" });
+    expect(JSON.parse(readFileSync(path.join(home, ".claude.json"), "utf8")).mcpServers.github.command).toBe("npx");
+    expect(JSON.parse(readFileSync(path.join(home, ".cursor", "mcp.json"), "utf8")).mcpServers.github.command).toBe("npx");
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("reads a git mcp.json that only has a VS Code servers key", async () => {
+    vi.spyOn(confirmModule, "requestLocalConfirmation").mockResolvedValue(true);
+    const home = mkdtempSync(path.join(tmpdir(), "loadout-install-mcp-servers-key-"));
+    mkdirSync(path.join(home, ".claude"), { recursive: true });
+    const clone = fakeClone({
+      "mcp.json": JSON.stringify({
+        servers: { playwright: { command: "npx", args: ["-y", "@microsoft/mcp-server-playwright"] } }
+      })
+    });
+
+    const result = await installGeneric(
+      { type: "git", ref: "https://github.com/example/pw-mcp.git" },
+      { kind: "mcp", scope: "global", projectPath: null, homeDir: home },
+      { gitClone: clone }
+    );
+
+    expect(result).toMatchObject({ installed: true, path: "playwright" });
+    expect(JSON.parse(readFileSync(path.join(home, ".claude.json"), "utf8")).mcpServers.playwright.command).toBe("npx");
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("does not replace a live MCP server that already has a different command", async () => {
+    vi.spyOn(confirmModule, "requestLocalConfirmation").mockResolvedValue(true);
+    const home = mkdtempSync(path.join(tmpdir(), "loadout-install-mcp-conflict-"));
+    mkdirSync(path.join(home, ".claude"), { recursive: true });
+    mkdirSync(path.join(home, ".cursor"), { recursive: true });
+    writeFileSync(
+      path.join(home, ".cursor", "mcp.json"),
+      JSON.stringify({ mcpServers: { github: { command: "npx", args: ["b"] } } })
+    );
+    const clone = fakeClone({
+      "mcp.json": JSON.stringify({
+        mcpServers: { github: { command: "npx", args: ["a"] } }
+      })
+    });
+
+    const result = await installGeneric(
+      { type: "git", ref: "https://github.com/example/github-mcp.git" },
+      { kind: "mcp", scope: "global", projectPath: null, homeDir: home },
+      { gitClone: clone }
+    );
+
+    expect(result).toMatchObject({ installed: true, path: "github" });
+    expect(JSON.parse(readFileSync(path.join(home, ".cursor", "mcp.json"), "utf8")).mcpServers.github.args).toEqual(["b"]);
+    expect(JSON.parse(readFileSync(path.join(home, ".claude.json"), "utf8")).mcpServers.github.args).toEqual(["a"]);
+    rmSync(home, { recursive: true, force: true });
   });
 
   it("skipConfirmation installs without asking, for an interactive CLI invocation", async () => {
@@ -108,12 +184,12 @@ describe("installGeneric", () => {
 
     const result = await installGeneric(
       { type: "git", ref: "https://github.com/example/skill.git" },
-      { tool: "claude_code", kind: "skill", scope: "global", projectPath: null, homeDir: home },
+      { kind: "skill", scope: "global", projectPath: null, homeDir: home },
       { gitClone: fakeClone(BARE_SKILL), skipConfirmation: true }
     );
 
     expect(confirm).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ installed: true, path: path.join(home, ".claude", "skills", "skill") });
+    expect(result).toMatchObject({ installed: true, path: path.join(home, ".agents", "skills", "skill") });
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -137,15 +213,15 @@ describe("installGeneric", () => {
 
       const result = await installGeneric(
         { type: "git", ref: "https://github.com/sslinNn/cc-limits", subdir: "skills/cc-limits" },
-        { tool: "claude_code", kind: "skill", scope: "global", projectPath: null, homeDir: home },
+        { kind: "skill", scope: "global", projectPath: null, homeDir: home },
         { gitClone: clone }
       );
 
-      const installed = path.join(home, ".claude", "skills", "cc-limits");
+      const installed = path.join(home, ".agents", "skills", "cc-limits");
       expect(result).toMatchObject({ installed: true, path: installed });
       expect(readFileSync(path.join(installed, "SKILL.md"), "utf8")).toContain("name: cc-limits");
-      expect(existsSync(path.join(home, ".claude", "skills", "other"))).toBe(false);
-      expect(existsSync(path.join(home, ".claude", "skills", "README.md"))).toBe(false);
+      expect(existsSync(path.join(home, ".agents", "skills", "other"))).toBe(false);
+      expect(existsSync(path.join(home, ".agents", "skills", "README.md"))).toBe(false);
     });
 
     it("refuses when the named subdirectory is not in the repository", async () => {
@@ -153,13 +229,13 @@ describe("installGeneric", () => {
 
       const result = await installGeneric(
         { type: "git", ref: "https://github.com/sslinNn/cc-limits", subdir: "skills/absent" },
-        { tool: "claude_code", kind: "skill", scope: "global", projectPath: null, homeDir: home },
+        { kind: "skill", scope: "global", projectPath: null, homeDir: home },
         { gitClone: clone }
       );
 
       expect(result.installed).toBe(false);
       expect(result.reason).toContain("skills/absent");
-      expect(existsSync(path.join(home, ".claude", "skills"))).toBe(false);
+      expect(existsSync(path.join(home, ".agents", "skills"))).toBe(false);
     });
 
     it("refuses when the resolved directory has no SKILL.md", async () => {
@@ -167,7 +243,7 @@ describe("installGeneric", () => {
 
       const result = await installGeneric(
         { type: "git", ref: "https://github.com/sslinNn/cc-limits", subdir: "skills/cc-limits" },
-        { tool: "claude_code", kind: "skill", scope: "global", projectPath: null, homeDir: home },
+        { kind: "skill", scope: "global", projectPath: null, homeDir: home },
         { gitClone: clone }
       );
 
@@ -180,7 +256,7 @@ describe("installGeneric", () => {
 
       const result = await installGeneric(
         { type: "git", ref: "https://github.com/sslinNn/cc-limits", subdir: "../../../etc" },
-        { tool: "claude_code", kind: "skill", scope: "global", projectPath: null, homeDir: home },
+        { kind: "skill", scope: "global", projectPath: null, homeDir: home },
         { gitClone: clone }
       );
 
@@ -189,7 +265,7 @@ describe("installGeneric", () => {
     });
 
     it("refuses rather than clobbering a skill that is already installed", async () => {
-      const existing = path.join(home, ".claude", "skills", "cc-limits");
+      const existing = path.join(home, ".agents", "skills", "cc-limits");
       mkdirSync(existing, { recursive: true });
       writeFileSync(path.join(existing, "SKILL.md"), "---\nname: mine\n---\n");
 
@@ -197,7 +273,7 @@ describe("installGeneric", () => {
 
       const result = await installGeneric(
         { type: "git", ref: "https://github.com/sslinNn/cc-limits", subdir: "skills/cc-limits" },
-        { tool: "claude_code", kind: "skill", scope: "global", projectPath: null, homeDir: home },
+        { kind: "skill", scope: "global", projectPath: null, homeDir: home },
         { gitClone: clone }
       );
 
@@ -211,11 +287,11 @@ describe("installGeneric", () => {
     it("names the destination after the repository when no subdirectory is given", async () => {
       const result = await installGeneric(
         { type: "git", ref: "https://github.com/example/my-skill.git" },
-        { tool: "claude_code", kind: "skill", scope: "global", projectPath: null, homeDir: home },
+        { kind: "skill", scope: "global", projectPath: null, homeDir: home },
         { gitClone: fakeClone(BARE_SKILL) }
       );
 
-      expect(result).toMatchObject({ installed: true, path: path.join(home, ".claude", "skills", "my-skill") });
+      expect(result).toMatchObject({ installed: true, path: path.join(home, ".agents", "skills", "my-skill") });
     });
 
     it("keeps .git out of the installed copy", async () => {
@@ -226,12 +302,12 @@ describe("installGeneric", () => {
 
       const result = await installGeneric(
         { type: "git", ref: "https://github.com/sslinNn/cc-limits", subdir: "skills/cc-limits" },
-        { tool: "claude_code", kind: "skill", scope: "global", projectPath: null, homeDir: home },
+        { kind: "skill", scope: "global", projectPath: null, homeDir: home },
         { gitClone: clone }
       );
 
       expect(result.installed).toBe(true);
-      expect(existsSync(path.join(home, ".claude", "skills", "cc-limits", ".git"))).toBe(false);
+      expect(existsSync(path.join(home, ".agents", "skills", "cc-limits", ".git"))).toBe(false);
     });
   });
 });

@@ -1,35 +1,33 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
-import TOML from "@iarna/toml";
+import os from "node:os";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { InstalledItem } from "@loadout/shared";
 import { redactSecrets } from "./secrets/redact.js";
+import { presentAdapters } from "./harnesses/registry.js";
+import { parkedMcpEntry, readDisabledMcp } from "./mcpStore.js";
 
 /**
  * The content worth keeping for one item.
  *
- * A skill's content is its SKILL.md. An MCP server's is its own entry — NOT the file it
- * happens to live in: ~/.claude.json also carries the oauth account, per-project history
- * and caches, and a whole-file backup would ship all of it to the server behind a
- * best-effort redactor.
+ * A skill's content is its SKILL.md. An MCP server's is its canonical entry — never the
+ * whole vendor config file (Claude's ~/.claude.json also carries oauth state).
  */
-export function backupContentFor(item: InstalledItem): string | null {
-  if (!existsSync(item.path)) return null;
-
+export function backupContentFor(item: InstalledItem, homeDir: string = os.homedir()): string | null {
   if (item.kind === "mcp") {
-    try {
-      const raw = readFileSync(item.path, "utf8");
-      const servers = item.path.endsWith(".toml")
-        ? ((TOML.parse(raw) as { mcp_servers?: Record<string, unknown> }).mcp_servers ?? {})
-        : ((JSON.parse(raw) as { mcpServers?: Record<string, unknown> }).mcpServers ?? {});
-      const entry = servers[item.name];
-      return entry === undefined ? null : JSON.stringify({ [item.name]: entry }, null, 2);
-    } catch {
-      return null;
+    for (const adapter of presentAdapters(homeDir)) {
+      const servers =
+        item.scope === "project" && item.projectPath
+          ? (adapter.readProjectMcp?.(item.projectPath) ?? {})
+          : adapter.readMcp(homeDir);
+      if (servers[item.name]) return JSON.stringify({ [item.name]: servers[item.name] }, null, 2);
     }
+    const parked = parkedMcpEntry(readDisabledMcp(homeDir), item.scope, item.name, item.projectPath);
+    return parked ? JSON.stringify({ [item.name]: parked }, null, 2) : null;
   }
 
+  if (!existsSync(item.path)) return null;
   const filePath = statSync(item.path).isDirectory() ? path.join(item.path, "SKILL.md") : item.path;
   return existsSync(filePath) ? readFileSync(filePath, "utf8") : null;
 }

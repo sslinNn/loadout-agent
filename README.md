@@ -1,6 +1,6 @@
 # loadout-agent
 
-CLI/daemon that scans and manages Claude Code and Codex skills/MCP servers on one machine.
+CLI/daemon that scans and manages skills (canonical `.agents/skills`) and MCP servers on one machine, then projects them onto detected harnesses (Claude Code, Codex, Cursor, Gemini CLI, Copilot).
 
 Contracts (`@loadout/shared`) live in [sslinNn/loadout-shared](https://github.com/sslinNn/loadout-shared).
 The web dashboard is [sslinNn/loadout](https://github.com/sslinNn/loadout).

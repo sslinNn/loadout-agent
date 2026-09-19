@@ -17,7 +17,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildSnapshot } from "../../src/scanners/snapshot";
-import { applyToggle } from "../../src/mutators/claudeCode";
+import { applyToggle } from "../../src/mutators/dispatch";
 // The same snake_case <-> camelCase mappers the daemon itself uses. Writing a camelCase
 // InstalledItem straight into PostgREST would fail ("column machineId does not exist"):
 // installed_items is snake_case (see the migration). This is exactly the producer/consumer
@@ -64,7 +64,7 @@ describe.skipIf(!LIVE_DB)("Phase 1 core loop", () => {
     expect(before!.find((i) => i.name === "loop-skill")!.enabled).toBe(true);
 
     const item = before!.find((i) => i.name === "loop-skill")!;
-    applyToggle(toInstalledItem(item), false);
+    applyToggle(toInstalledItem(item), false, home);
     expect(existsSync(skillDir)).toBe(false);
 
     const rescanned = buildSnapshot({ machineId: machine!.id, homeDir: home });

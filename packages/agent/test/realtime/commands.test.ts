@@ -52,7 +52,6 @@ describe("subscribeCommands", () => {
   it("accepts an install command carrying a repository subdirectory", () => {
     const parsed = RealtimeCommandSchema.safeParse({
       type: "install",
-      tool: "claude_code",
       kind: "skill",
       scope: "global",
       projectPath: null,
@@ -69,7 +68,6 @@ describe("subscribeCommands", () => {
   it("still accepts an install command with no subdirectory", () => {
     const parsed = RealtimeCommandSchema.safeParse({
       type: "install",
-      tool: "claude_code",
       kind: "skill",
       scope: "global",
       projectPath: null,

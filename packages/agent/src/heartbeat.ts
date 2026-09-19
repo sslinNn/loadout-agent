@@ -1,20 +1,28 @@
+import os from "node:os";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { readPackageVersion } from "./version.js";
+import { presentHarnessIds } from "./skills/project.js";
 
 export function startHeartbeat(
   client: SupabaseClient,
   machineId: string,
-  opts: { intervalMs?: number } = {}
+  opts: { intervalMs?: number; homeDir?: string } = {}
 ): { stop: () => Promise<void> } {
   // `agent_version` rides along on every beat: pairing writes it once, but the machine keeps
   // running across upgrades, so a row written at pair time would show that stale version forever.
   // Read once — the running process can't change its own version.
   const agentVersion = readPackageVersion();
+  const homeDir = opts.homeDir ?? os.homedir();
 
   async function beat(status: "online" | "offline") {
     await client
       .from("machines")
-      .update({ status, last_seen_at: new Date().toISOString(), agent_version: agentVersion })
+      .update({
+        status,
+        last_seen_at: new Date().toISOString(),
+        agent_version: agentVersion,
+        present_harnesses: presentHarnessIds(homeDir)
+      })
       .eq("id", machineId);
   }
 

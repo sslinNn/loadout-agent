@@ -17,6 +17,7 @@ jobs:
         with:
           node-version: "22"
           cache: npm
+      - run: git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
       - run: npm ci
       - run: npm run build
       - run: npm test

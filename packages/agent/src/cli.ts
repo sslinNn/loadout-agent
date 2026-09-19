@@ -10,6 +10,12 @@ import { supabaseConnection } from "./config.js";
 import { approvePending, configureTrustWindow, denyPending, isSocketLive } from "./installer/confirm.js";
 import { restoreSnapshot } from "./installer/restore.js";
 import { installGeneric } from "./installer/generic.js";
+import {
+  applyInstallCommand,
+  clientFromStoredAccessToken,
+  installedItemFromInstall,
+  recordInstallProvenance
+} from "./installer/command.js";
 import { createRealtimeClient } from "./realtime/client.js";
 import { subscribeCommands } from "./realtime/commands.js";
 import { startHeartbeat } from "./heartbeat.js";
@@ -20,10 +26,7 @@ import { readPackageVersion } from "./version.js";
 import { startUpgradeWatch } from "./upgradeWatch.js";
 import { installService, uninstallService, serviceStatus } from "./service/index.js";
 import * as log from "./log.js";
-import * as codexMutator from "./mutators/codex.js";
-import * as claudeCodeMutator from "./mutators/claudeCode.js";
-
-const mutators = { codex: codexMutator, claude_code: claudeCodeMutator };
+import { applyToggle, removeItem } from "./mutators/dispatch.js";
 
 // Row mappers (snake_case PostgREST ↔ camelCase InstalledItem) live in @loadout/shared.
 
@@ -41,10 +44,19 @@ function logError(operation: string, error: unknown): void {
 // `last_synced_at` is deliberately NOT in this list even though a rescan does write it: the
 // scanners stamp it with `new Date()`, so including it would make every item differ from its
 // stored row on every single scan — which is precisely the bug this guards against.
-const DISK_OBSERVABLE_COLUMNS = ["tool", "kind", "name", "enabled", "path", "scope", "project_path"] as const;
+const DISK_OBSERVABLE_COLUMNS = ["harnesses", "kind", "name", "enabled", "path", "scope", "project_path"] as const;
+
+function sameDiskValue(a: unknown, b: unknown): boolean {
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((value, i) => value === b[i]);
+  }
+  return a === b;
+}
 
 function diskStateMatches(existing: Record<string, unknown>, row: ReturnType<typeof toInstalledItemRow>): boolean {
-  return DISK_OBSERVABLE_COLUMNS.every((col) => existing[col] === (row as Record<string, unknown>)[col]);
+  return DISK_OBSERVABLE_COLUMNS.every((col) =>
+    sameDiskValue(existing[col], (row as Record<string, unknown>)[col])
+  );
 }
 
 /**
@@ -80,10 +92,10 @@ function reportSync(groups: { added: string[]; changed: string[]; removed: strin
  *
  * 1. Provenance is write-once. The scanners cannot know where an item on disk came from, so
  *    they hardcode `sourceType: "manual"`. If a re-scan upserted the whole row it would
- *    overwrite the correct `source_type`/`source_ref` that the install path recorded (see
- *    the "install" branch below), turning every restorable item back into an unrestorable
- *    "manual" one on the next file-watcher tick. So: INSERT the full row the first time an
- *    id is seen, and on later scans UPDATE only the disk-observable columns.
+ *    overwrite the correct `source_type`/`source_ref`/`source_subdir` that the install path
+ *    recorded (see the "install" branch below), turning every restorable item back into an
+ *    unrestorable "manual" one on the next file-watcher tick. So: INSERT the full row the
+ *    first time an id is seen, and on later scans UPDATE only the disk-observable columns.
  * 2. Stale rows are deleted. An item removed from disk by hand (outside a dashboard
  *    "remove" command) would otherwise linger in the table forever.
  *
@@ -118,7 +130,7 @@ export async function upsertSnapshot(client: SupabaseClient, snapshot: Snapshot)
       continue;
     }
     if (diskStateMatches(existing, row)) continue;
-    const { source_type, source_ref, content_backup_id, ...diskObservable } = row;
+    const { source_type, source_ref, source_subdir, content_backup_id, ...diskObservable } = row;
     const { error } = await client
       .from("installed_items")
       .update(diskObservable)
@@ -316,31 +328,50 @@ export function buildCli(): Command {
     .description(
       "install a skill from a git repository onto this machine without the dashboard (the path holding SKILL.md, when it is not the repository root)"
     )
-    .option("--tool <tool>", "claude_code or codex (which skills directory to install into)", "claude_code")
     .option("--project <path>", "install project-scoped into this project instead of globally into your home directory")
-    .action(async (gitUrl: string, subdir: string | undefined, opts: { tool: string; project?: string }) => {
-      if (opts.tool !== "claude_code" && opts.tool !== "codex") {
-        console.error(`Unknown tool '${opts.tool}'. Expected 'claude_code' or 'codex'.`);
-        process.exitCode = 1;
-        return;
-      }
+    .action(async (gitUrl: string, subdir: string | undefined, opts: { project?: string }) => {
       const scope = opts.project ? "project" : "global";
       if (scope === "project" && !path.isAbsolute(opts.project!)) {
         console.error("--project expects an absolute path.");
         process.exitCode = 1;
         return;
       }
-      // No pair/credentials needed: this installs locally only, it writes nothing to the
-      // account and no future sync will restore it (the scanners see it, and a dashboard
-      // install would overwrite nothing — see installGeneric's already-installed refusal).
+      // skipConfirmation: the user typed this command themselves — that IS consent.
+      // requestLocalConfirmation would bind the running daemon's ~/.loadout/confirm.sock
+      // (EADDRINUSE) and re-ask a question they already answered.
       const outcome = await installGeneric(
         { type: "git", ref: gitUrl, subdir: subdir ?? null },
-        { tool: opts.tool as "claude_code" | "codex", kind: "skill", scope, projectPath: opts.project ?? null }
+        { kind: "skill", scope, projectPath: opts.project ?? null },
+        { skipConfirmation: true }
       );
       if (!outcome.installed || !outcome.path) {
         console.error(`Install failed: ${outcome.reason ?? "unknown reason"}`);
         process.exitCode = 1;
         return;
+      }
+      // Pairing is optional for the files to land. When this machine IS paired, write
+      // provenance immediately so a running daemon's next scan cannot INSERT the item as
+      // unrestorable source_type "manual". Uses the stored access token only — setSession
+      // would rotate the refresh token out from under `loadout run`.
+      const creds = readCredentials();
+      if (creds) {
+        try {
+          await recordInstallProvenance(
+            clientFromStoredAccessToken(creds),
+            installedItemFromInstall({
+              outcomePath: outcome.path,
+              machineId: creds.machineId,
+              kind: "skill",
+              scope,
+              projectPath: opts.project ?? null,
+              sourceType: "git",
+              sourceRef: gitUrl,
+              sourceSubdir: subdir ?? null
+            })
+          );
+        } catch (err) {
+          logError("record install provenance", err);
+        }
       }
       console.log(`Installed to ${outcome.path}`);
     });
@@ -441,7 +472,7 @@ export function buildCli(): Command {
           logError(`select installed_items ${command.itemId}`, error);
           if (!row) return;
           const item = toInstalledItem(row);
-          mutators[item.tool].applyToggle(item, command.enabled);
+          applyToggle(item, command.enabled);
         } else if (command.type === "remove") {
           const { data: row, error } = await client
             .from("installed_items")
@@ -453,7 +484,7 @@ export function buildCli(): Command {
           if (!row) return;
           const item = toInstalledItem(row);
           await maybeCaptureContentBackup(client, item);
-          mutators[item.tool].removeItem(item);
+          removeItem(item);
           const { error: deleteError } = await client
             .from("installed_items")
             .delete()
@@ -472,61 +503,7 @@ export function buildCli(): Command {
           );
           logError("insert restore_results", error);
         } else if (command.type === "install") {
-          // installGeneric's InstallSource.type is "git" | "npm" | "url" (see
-          // ./installer/generic.ts), narrower than the command's sourceType, which is the
-          // shared SourceTypeSchema ("manual" | "git" | "npm" | "marketplace" — see
-          // packages/shared/src/schemas.ts). "git"/"npm" pass through; anything else
-          // (marketplace-hosted content, or the "manual" value that a real install command
-          // should never carry) is fetched as a plain URL.
-          const sourceType: "git" | "npm" | "url" =
-            command.sourceType === "git" || command.sourceType === "npm" ? command.sourceType : "url";
-          const outcome = await installGeneric(
-            { type: sourceType, ref: command.sourceRef, subdir: command.sourceSubdir ?? null },
-            { tool: command.tool, kind: command.kind, scope: command.scope, projectPath: command.projectPath }
-          );
-          if (!outcome.installed || !outcome.path) {
-            log.info(`install of ${command.sourceRef} did not complete: ${outcome.reason ?? "unknown"}`);
-            return;
-          }
-
-          // Record the new item's PROVENANCE immediately. Nothing else can: the scanners
-          // read only the filesystem, which carries no record of where a directory came
-          // from, so they hardcode source_type "manual" — and restoreSnapshot skips every
-          // manual item. Writing the row here is what makes a freshly installed item
-          // restorable at all. The id is built with the same deterministic shape the
-          // scanners use (`<tool>:<kind>:<scope>:<path>`), so the watcher's re-scan of this
-          // very directory lands on THIS row instead of creating a duplicate — and
-          // upsertSnapshot's update path deliberately leaves source_type/source_ref alone.
-          const now = new Date().toISOString();
-          const item: InstalledItem = {
-            id: `${command.tool}:${command.kind}:${command.scope}:${outcome.path}`,
-            machineId: creds!.machineId,
-            tool: command.tool,
-            kind: command.kind,
-            name: path.basename(outcome.path),
-            enabled: true,
-            path: outcome.path,
-            scope: command.scope,
-            projectPath: command.projectPath,
-            sourceType: command.sourceType,
-            sourceRef: command.sourceRef,
-            contentBackupId: null,
-            lastSyncedAt: now
-          };
-          const { error: insertError } = await client
-            .from("installed_items")
-            .upsert(toInstalledItemRow(item), { onConflict: "machine_id,id" });
-          logError(`insert installed_items for installed ${command.sourceRef}`, insertError);
-
-          if (command.listingId) {
-            const { error: installsError } = await client
-              .from("installs")
-              .upsert(
-                { listing_id: command.listingId, machine_id: creds!.machineId },
-                { onConflict: "listing_id,machine_id" }
-              );
-            logError(`insert installs row for listing ${command.listingId}`, installsError);
-          }
+          await applyInstallCommand(command, { client, machineId: creds!.machineId });
         }
       }
 

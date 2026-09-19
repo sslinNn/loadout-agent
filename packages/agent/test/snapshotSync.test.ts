@@ -74,17 +74,18 @@ function fakeClient(opts: { existingIds?: string[]; existingRows?: Record<string
 }
 
 const item = (over: Partial<InstalledItem> = {}): InstalledItem => ({
-  id: "claude_code:skill:global:/home/u/.claude/skills/a",
+  id: "skill:global:/home/u/.agents/skills/a",
   machineId: "m1",
-  tool: "claude_code",
+  harnesses: ["claude_code"],
   kind: "skill",
   name: "a",
   enabled: true,
-  path: "/home/u/.claude/skills/a",
+  path: "/home/u/.agents/skills/a",
   scope: "global",
   projectPath: null,
   sourceType: "manual",
   sourceRef: null,
+  sourceSubdir: null,
   contentBackupId: null,
   lastSyncedAt: "2026-01-01T00:00:00.000Z",
   ...over
@@ -109,7 +110,7 @@ describe("upsertSnapshot", () => {
 
     const upsert = calls.find((c) => c.op === "upsert")!;
     expect((upsert.payload as unknown[])[0]).toMatchObject({
-      id: "claude_code:skill:global:/home/u/.claude/skills/a",
+      id: "skill:global:/home/u/.agents/skills/a",
       machine_id: "m1",
       project_path: null,
       source_type: "manual",
@@ -122,7 +123,7 @@ describe("upsertSnapshot", () => {
   it("inserts every new item in a single request", async () => {
     const { client, calls } = fakeClient({ existingIds: [] });
     const items = ["a", "b", "c"].map((n) =>
-      item({ id: `claude_code:skill:global:/home/u/.claude/skills/${n}`, name: n, path: `/home/u/.claude/skills/${n}` })
+      item({ id: `skill:global:/home/u/.agents/skills/${n}`, name: n, path: `/home/u/.agents/skills/${n}` })
     );
     await upsertSnapshot(client, snapshot(items));
 
@@ -177,10 +178,76 @@ describe("upsertSnapshot", () => {
     const update = calls.find((c) => c.op === "update")!;
     expect(update.payload).not.toHaveProperty("source_type");
     expect(update.payload).not.toHaveProperty("source_ref");
+    expect(update.payload).not.toHaveProperty("source_subdir");
     expect(update.payload).not.toHaveProperty("content_backup_id");
     // disk-observable state IS still refreshed
     expect(update.payload).toMatchObject({ enabled: true, path: existing.path, name: "a" });
     expect(update.filters).toContainEqual(["eq:id", existing.id]);
+  });
+
+  it("inserts source_subdir on a never-before-seen git skill", async () => {
+    const { client, calls } = fakeClient({ existingIds: [] });
+    await upsertSnapshot(
+      client,
+      snapshot([
+        item({
+          sourceType: "git",
+          sourceRef: "https://github.com/sslinNn/cc-limits",
+          sourceSubdir: "skills/cc-limits"
+        })
+      ])
+    );
+
+    expect((calls.find((c) => c.op === "upsert")!.payload as Record<string, unknown>[])[0]).toMatchObject({
+      source_type: "git",
+      source_ref: "https://github.com/sslinNn/cc-limits",
+      source_subdir: "skills/cc-limits"
+    });
+  });
+
+  // Scanners always stamp manual/null. A quiet rescan of a plugin skill must not look
+  // like a change just because provenance differs — otherwise last_synced_at churns and
+  // a later disk-state update would be the only thing standing between restore and a wipe.
+  it("writes nothing when disk state is unchanged even if scanners stamped manual", async () => {
+    const existing = item({
+      sourceType: "git",
+      sourceRef: "https://github.com/sslinNn/cc-limits",
+      sourceSubdir: "skills/cc-limits"
+    });
+    const onDisk = item({
+      sourceType: "manual",
+      sourceRef: null,
+      sourceSubdir: null,
+      lastSyncedAt: "2026-06-06T12:00:00.000Z"
+    });
+    const { client, calls } = fakeClient({ existingRows: [toInstalledItemRow(existing)] });
+    await upsertSnapshot(client, snapshot([onDisk]));
+
+    expect(calls.some((c) => c.op === "update")).toBe(false);
+    expect(calls.some((c) => c.op === "upsert")).toBe(false);
+  });
+
+  it("leaves git provenance including source_subdir intact when a disk field does change", async () => {
+    const existing = item({
+      sourceType: "git",
+      sourceRef: "https://github.com/sslinNn/cc-limits",
+      sourceSubdir: "skills/cc-limits",
+      enabled: true
+    });
+    const onDisk = item({
+      sourceType: "manual",
+      sourceRef: null,
+      sourceSubdir: null,
+      enabled: false
+    });
+    const { client, calls } = fakeClient({ existingRows: [toInstalledItemRow(existing)] });
+    await upsertSnapshot(client, snapshot([onDisk]));
+
+    const update = calls.find((c) => c.op === "update")!;
+    expect(update.payload).toMatchObject({ enabled: false });
+    expect(update.payload).not.toHaveProperty("source_type");
+    expect(update.payload).not.toHaveProperty("source_ref");
+    expect(update.payload).not.toHaveProperty("source_subdir");
   });
 
   // C-composite-key: the scanners derive an item's id from its PATH alone, so two of one
@@ -208,16 +275,16 @@ describe("upsertSnapshot", () => {
   // I5
   it("deletes rows for items that are no longer on disk", async () => {
     const kept = item();
-    const { client, calls } = fakeClient({ existingIds: [kept.id, "claude_code:skill:global:/gone"] });
+    const { client, calls } = fakeClient({ existingIds: [kept.id, "skill:global:/gone"] });
     await upsertSnapshot(client, snapshot([kept]));
 
     const del = calls.find((c) => c.op === "delete")!;
     expect(del.filters).toContainEqual(["eq:machine_id", "m1"]);
-    expect(del.filters).toContainEqual(["in:id", ["claude_code:skill:global:/gone"]]);
+    expect(del.filters).toContainEqual(["in:id", ["skill:global:/gone"]]);
   });
 
   it("never deletes anything when the scan produced zero items (a possible scan failure)", async () => {
-    const { client, calls } = fakeClient({ existingIds: ["claude_code:skill:global:/a", "claude_code:skill:global:/b"] });
+    const { client, calls } = fakeClient({ existingIds: ["skill:global:/a", "skill:global:/b"] });
     await upsertSnapshot(client, snapshot([]));
 
     expect(calls.some((c) => c.op === "delete")).toBe(false);
@@ -237,7 +304,7 @@ describe("upsertSnapshot", () => {
   });
 
   it("counts a first sync's inserts and a vanished item's deletion in the same line", async () => {
-    const gone = item({ id: "claude_code:skill:global:/gone", name: "gone", path: "/gone" });
+    const gone = item({ id: "skill:global:/gone", name: "gone", path: "/gone" });
     const { client } = fakeClient({ existingRows: [toInstalledItemRow(gone)] });
     await upsertSnapshot(client, snapshot([item(), item({ id: "x", name: "b", path: "/b" })]));
 
