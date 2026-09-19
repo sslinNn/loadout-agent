@@ -9,25 +9,48 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # Job-level OIDC permission (inherits top-level, made explicit for clarity).
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
-      # No registry-url: setup-node would inject a dummy NODE_AUTH_TOKEN and
+      # No registry-url: setup-node would inject _authToken=${NODE_AUTH_TOKEN} and
       # npm would skip OIDC trusted publishing (404 / ENEEDAUTH).
       - uses: actions/setup-node@v4
         with: { node-version: "24" }
       - run: npm install -g npm@latest
+      - name: OIDC / npm preflight
+        run: |
+          set -euo pipefail
+          echo "node=$(node -v) npm=$(npm -v)"
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+            echo "missing ACTIONS_ID_TOKEN_REQUEST_*; id-token: write did not take effect" >&2
+            exit 1
+          fi
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL is set"
+          # Strip any classic auth that would block OIDC exchange.
+          for f in "${NPM_CONFIG_USERCONFIG:-}" "$HOME/.npmrc" "$RUNNER_TEMP/.npmrc"; do
+            [ -n "$f" ] && [ -f "$f" ] || continue
+            echo "scrubbing auth from $f"
+            sed -i '/_authToken/d;/\/\/registry.npmjs.org/d' "$f" || true
+          done
       - run: git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
       # npm@latest refuses git deps (EALLOWGIT). @loadout/shared is a GitHub pin, build-time only.
-      - run: npm ci --allow-git all --allow-remote all
+      - run: npm ci --allow-git=all --allow-remote=all
       - run: npm run build
       - run: bash scripts/assert-publishable.sh
       - name: Publish
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          set -euo pipefail
           unset NODE_AUTH_TOKEN
+          # Empty NPM_TOKEN must not linger — classic-auth path blocks OIDC.
           if [ -n "${NPM_TOKEN:-}" ]; then
             printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > "$HOME/.npmrc"
             chmod 600 "$HOME/.npmrc"
+          else
+            unset NPM_TOKEN
           fi
           npm publish -w loadout-agent --access public
