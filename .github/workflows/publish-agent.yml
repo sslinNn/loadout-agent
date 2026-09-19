@@ -2,6 +2,7 @@ name: Publish loadout-agent
 on:
   push:
     tags: ["loadout-agent-v*"]
+  workflow_dispatch:
 permissions:
   contents: read
   id-token: write
