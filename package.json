@@ -9,8 +9,8 @@
     "test": "npm test --workspace=loadout-agen"
   },
   "devDependencies": {
+    "@types/node": "^20",
     "typescript": "^5.6.0",
-    "vitest": "^2.1.0",
-    "@types/node": "^20"
+    "vitest": "^2.1.0"
   }
 }
