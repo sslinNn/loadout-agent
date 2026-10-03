@@ -4,7 +4,14 @@ import { Command } from "commander";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { Snapshot } from "@loadout/shared";
 import { toInstalledItemRow } from "@loadout/shared";
-import { readLocalConfig, writeLocalConfig, writeCredentials, readCredentials } from "./localConfig.js";
+import {
+  readLocalConfig,
+  writeLocalConfig,
+  writeCredentials,
+  readCredentials,
+  confirmationsSuspendedUntil,
+  MAX_SUSPEND_MINUTES
+} from "./localConfig.js";
 import { requestPairingCode, pairAndRegisterMachine } from "./pairing.js";
 import { supabaseConnection } from "./config.js";
 import { approvePending, configureTrustWindow, denyPending, isSocketLive, listPending } from "./installer/confirm.js";
@@ -168,6 +175,14 @@ export async function upsertSnapshot(client: SupabaseClient, snapshot: Snapshot)
   reportSync({ added, changed, removed });
 }
 
+/** One line answering "is this machine currently unguarded?" */
+function describeSuspension(): string {
+  const until = confirmationsSuspendedUntil();
+  if (!until) return "Confirmations: on (dashboard installs and restores ask first).";
+  const minutes = Math.ceil((until.getTime() - Date.now()) / 60_000);
+  return `Confirmations: OFF for another ${minutes} min (until ${until.toLocaleTimeString()}). 'loadout confirm-installs on' ends it now.`;
+}
+
 export function buildCli(): Command {
   const program = new Command();
   program.name("loadout").version(readPackageVersion());
@@ -219,6 +234,38 @@ export function buildCli(): Command {
         minutes > 0
           ? `Trust window set to ${minutes} minute(s). One approval will cover follow-up actions on this machine for that long.`
           : "Trust window disabled. Every action will be confirmed."
+      );
+    });
+
+  program
+    .command("confirm-installs [state] [minutes]")
+    .description(
+      `suspend local confirmation of dashboard installs and restores for a while ('off <minutes>', at most ${MAX_SUSPEND_MINUTES}), turn it back on ('on'), or show its state`
+    )
+    .action((state: string | undefined, minutes: string | undefined) => {
+      const cfg = readLocalConfig();
+      if (state === undefined) {
+        console.log(describeSuspension());
+        return;
+      }
+      if (state === "on") {
+        writeLocalConfig({ ...cfg, confirmationsSuspendedUntil: null });
+        console.log("Confirmations are on: every dashboard install and restore asks first.");
+        return;
+      }
+      const length = Number(minutes);
+      if (state !== "off" || !minutes || !Number.isInteger(length) || length <= 0 || length > MAX_SUSPEND_MINUTES) {
+        console.error(`Expected 'on', or 'off <minutes>' with 1–${MAX_SUSPEND_MINUTES} minutes. There is no permanent off.`);
+        process.exitCode = 1;
+        return;
+      }
+      const until = new Date(Date.now() + length * 60_000);
+      writeLocalConfig({ ...cfg, confirmationsSuspendedUntil: until.toISOString() });
+      console.log(
+        `Confirmations are OFF until ${until.toLocaleTimeString()} (${length} min).\n` +
+          "Until then, anything installed from the dashboard — including by someone holding your\n" +
+          "session — lands in your agent's skills and MCP configs without asking you.\n" +
+          "They come back on by themselves; 'loadout confirm-installs on' ends it now."
       );
     });
 
@@ -521,6 +568,7 @@ export function buildCli(): Command {
     .description("show whether the background service is installed and running")
     .action(async () => {
       console.log(await serviceStatus());
+      console.log(describeSuspension());
     });
 
   return program;

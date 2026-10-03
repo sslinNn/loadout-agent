@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import * as log from "../log.js";
 import { promptWithButtons } from "./prompt.js";
+import { confirmationsSuspendedUntil } from "../localConfig.js";
 
 export interface ConfirmAction {
   id: string;
@@ -69,6 +70,18 @@ let serverStartPromise: Promise<Server> | null = null;
 // length, set once at daemon start; `trustedUntil` is the timestamp an approval last extended.
 let trustWindowMinutes = 0;
 let trustedUntil = 0;
+
+// `loadout confirm-installs off <minutes>`: read from ~/.loadout/config.json on every request,
+// so turning it off (or back on) takes effect without restarting the daemon. Unlike the trust
+// window it is persisted — a restart inside the window must not quietly re-arm it, and one
+// after the window must — and it is always bounded (MAX_SUSPEND_MINUTES). Whatever can write
+// that file can already write ~/.claude directly, so the file grants nothing new.
+let suspensionSource: () => Date | null = () => confirmationsSuspendedUntil();
+
+/** Test-only: replace where the suspension window is read from. */
+export function setSuspensionSourceForTests(source: () => Date | null): void {
+  suspensionSource = source;
+}
 
 /**
  * Told when a confirmation starts waiting for a person and when it is answered. The command
@@ -291,6 +304,12 @@ export async function requestLocalConfirmation(
 
   if (Date.now() < trustedUntil) {
     log.info(`trust window covers: ${action.description}`);
+    return true;
+  }
+
+  const suspendedUntil = suspensionSource();
+  if (suspendedUntil) {
+    log.warn(`confirmations suspended until ${suspendedUntil.toISOString()}; approving without asking: ${action.description}`);
     return true;
   }
 
