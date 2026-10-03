@@ -65,7 +65,7 @@ describe("restoreSnapshot", () => {
     await restoreSnapshot([pluginItem]);
 
     expect(installSpy).toHaveBeenCalledWith(
-      { type: "git", ref: "https://github.com/example/a.git", subdir: "skills/cc-limits" },
+      { type: "git", ref: "https://github.com/example/a.git", subdir: "skills/cc-limits", commit: null },
       expect.objectContaining({ kind: "skill", scope: "global", projectPath: null }),
       expect.objectContaining({ skipConfirmation: true })
     );

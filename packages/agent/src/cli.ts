@@ -130,7 +130,9 @@ export async function upsertSnapshot(client: SupabaseClient, snapshot: Snapshot)
       continue;
     }
     if (diskStateMatches(existing, row)) continue;
-    const { source_type, source_ref, source_subdir, content_backup_id, ...diskObservable } = row;
+    // Provenance (including the installed commit) is write-once: the scanners report it as
+    // null, and writing that back would erase what the install recorded.
+    const { source_type, source_ref, source_subdir, source_commit, content_backup_id, ...diskObservable } = row;
     const { error } = await client
       .from("installed_items")
       .update(diskObservable)
@@ -329,7 +331,8 @@ export function buildCli(): Command {
       "install a skill from a git repository onto this machine without the dashboard (the path holding SKILL.md, when it is not the repository root)"
     )
     .option("--project <path>", "install project-scoped into this project instead of globally into your home directory")
-    .action(async (gitUrl: string, subdir: string | undefined, opts: { project?: string }) => {
+    .option("--commit <sha>", "check out exactly this commit (40 hex characters) instead of the default branch")
+    .action(async (gitUrl: string, subdir: string | undefined, opts: { project?: string; commit?: string }) => {
       const scope = opts.project ? "project" : "global";
       if (scope === "project" && !path.isAbsolute(opts.project!)) {
         console.error("--project expects an absolute path.");
@@ -340,7 +343,7 @@ export function buildCli(): Command {
       // requestLocalConfirmation would bind the running daemon's ~/.loadout/confirm.sock
       // (EADDRINUSE) and re-ask a question they already answered.
       const outcome = await installGeneric(
-        { type: "git", ref: gitUrl, subdir: subdir ?? null },
+        { type: "git", ref: gitUrl, subdir: subdir ?? null, commit: opts.commit ?? null },
         { kind: "skill", scope, projectPath: opts.project ?? null },
         { skipConfirmation: true }
       );
@@ -366,7 +369,8 @@ export function buildCli(): Command {
               projectPath: opts.project ?? null,
               sourceType: "git",
               sourceRef: gitUrl,
-              sourceSubdir: subdir ?? null
+              sourceSubdir: subdir ?? null,
+              sourceCommit: outcome.commit ?? null
             })
           );
         } catch (err) {

@@ -110,6 +110,7 @@ function scanScope(opts: {
       sourceType: "manual",
       sourceRef: null,
       sourceSubdir: null,
+      sourceCommit: null,
       contentBackupId: null,
       lastSyncedAt: new Date().toISOString()
     });

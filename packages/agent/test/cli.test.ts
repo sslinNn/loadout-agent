@@ -119,7 +119,7 @@ describe("loadout install <git-url> [subdir]", () => {
     await run(["https://github.com/example/my-skill"]);
 
     expect(install).toHaveBeenCalledWith(
-      { type: "git", ref: "https://github.com/example/my-skill", subdir: null },
+      { type: "git", ref: "https://github.com/example/my-skill", subdir: null, commit: null },
       { kind: "skill", scope: "global", projectPath: null },
       expect.objectContaining({ skipConfirmation: true })
     );
@@ -150,7 +150,7 @@ describe("loadout install <git-url> [subdir]", () => {
     await run(["https://github.com/example/repo", "skills/s", "--project", "/p"]);
 
     expect(install).toHaveBeenCalledWith(
-      { type: "git", ref: "https://github.com/example/repo", subdir: "skills/s" },
+      { type: "git", ref: "https://github.com/example/repo", subdir: "skills/s", commit: null },
       { kind: "skill", scope: "project", projectPath: "/p" },
       expect.objectContaining({ skipConfirmation: true })
     );

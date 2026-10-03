@@ -26,7 +26,9 @@ export async function restoreSnapshot(
     const sourceType = item.sourceType === "marketplace" ? "url" : (item.sourceType as "git" | "npm" | "url");
     try {
       const outcome = await installGeneric(
-        { type: sourceType, ref: item.sourceRef, subdir: item.sourceSubdir ?? null },
+        // The commit the source machine actually has, so a restore copies those files and
+        // not whatever the branch moved to since.
+        { type: sourceType, ref: item.sourceRef, subdir: item.sourceSubdir ?? null, commit: item.sourceCommit ?? null },
         { kind: item.kind, scope: item.scope, projectPath: item.projectPath, homeDir: strategies.homeDir },
         { gitClone: strategies.gitClone, skipConfirmation: true }
       );

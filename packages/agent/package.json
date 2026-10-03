@@ -33,7 +33,7 @@
     "zod": "^3.23.0"
   },
   "devDependencies": {
-    "@loadout/shared": "github:sslinNn/loadout-shared#e19b2bd00c76278927fec4c7b64785ad3f29c7cb",
+    "@loadout/shared": "github:sslinNn/loadout-shared#f5439c13260bba02163fe89e4f82dccc2dd9db51",
     "esbuild": "^0.21.5",
     "@types/node": "^20"
   }

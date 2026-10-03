@@ -1,5 +1,7 @@
+import os from "node:os";
 import { describe, it, expect, vi } from "vitest";
-import { pollUntilPaired, pairAndRegisterMachine } from "../src/pairing";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { pollUntilPaired, pairAndRegisterMachine, requestPairingCode, machineIdentity } from "../src/pairing";
 import { readPackageVersion } from "../src/version";
 
 function fakeClientWithSequence(statuses: Array<{ status: string; session?: unknown }>) {
@@ -96,5 +98,31 @@ describe("pairAndRegisterMachine", () => {
       expect(update).not.toHaveBeenCalled();
       expect(insert).toHaveBeenCalled();
     });
+  });
+});
+
+describe("requestPairingCode", () => {
+  it("says which machine is asking", async () => {
+    const rpc = vi.fn().mockResolvedValue({ data: { code: "ABCDEFGHJKLM" }, error: null });
+    const result = await requestPairingCode({ rpc } as unknown as SupabaseClient);
+    expect(result.code).toBe("ABCDEFGHJKLM");
+    expect(rpc).toHaveBeenCalledWith("request_pairing_code", machineIdentity());
+    expect(machineIdentity().hostname).toBe(os.hostname());
+  });
+
+  it("falls back to the zero-argument call on a deployment that predates it", async () => {
+    const rpc = vi
+      .fn()
+      .mockResolvedValueOnce({ data: null, error: { code: "PGRST202", message: "no function" } })
+      .mockResolvedValueOnce({ data: { code: "ABCDEFGHJKLM" }, error: null });
+    const result = await requestPairingCode({ rpc } as unknown as SupabaseClient);
+    expect(result.code).toBe("ABCDEFGHJKLM");
+    expect(rpc).toHaveBeenLastCalledWith("request_pairing_code");
+  });
+
+  it("does not retry on any other error", async () => {
+    const rpc = vi.fn().mockResolvedValue({ data: null, error: { code: "P0001", message: "rate limited" } });
+    await expect(requestPairingCode({ rpc } as unknown as SupabaseClient)).rejects.toMatchObject({ code: "P0001" });
+    expect(rpc).toHaveBeenCalledTimes(1);
   });
 });
