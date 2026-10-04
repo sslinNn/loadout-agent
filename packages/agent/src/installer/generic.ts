@@ -12,7 +12,13 @@ import { agentsSkillsDir } from "../skills/store.js";
 
 const execFileAsync = promisify(execFile);
 
-export interface InstallSource { type: "git" | "npm" | "url"; ref: string; subdir?: string | null }
+export interface InstallSource {
+  type: "git" | "npm" | "url";
+  ref: string;
+  subdir?: string | null;
+  /** Check out exactly this commit (a reviewed listing pins one). Null/absent: the default branch. */
+  commit?: string | null;
+}
 export interface InstallTarget {
   kind: "skill" | "mcp";
   scope: "global" | "project";
@@ -21,7 +27,9 @@ export interface InstallTarget {
   homeDir?: string;
 }
 export interface InstallStrategies {
-  gitClone?: (ref: string, destDir: string) => Promise<string>;
+  gitClone?: (ref: string, destDir: string, commit?: string | null) => Promise<string>;
+  /** The commit a clone's HEAD is at, or null when it cannot be told (not a git checkout). */
+  resolveCommit?: (repoDir: string) => Promise<string | null>;
   // For an interactive `loadout install <ref>` run by the user in their own terminal: the
   // invocation itself is the consent, and going through requestLocalConfirmation here would
   // try to bind the running daemon's confirmation socket (EADDRINUSE) and re-ask a question
@@ -38,9 +46,44 @@ function repoNameFrom(ref: string): string {
   return path.basename(ref).replace(/\.git$/, "") || "repo";
 }
 
-async function defaultGitClone(ref: string, destDir: string): Promise<string> {
-  await execFileAsync("git", ["clone", "--depth", "1", ref, destDir]);
+const COMMIT_SHA = /^[0-9a-f]{40}$/;
+
+/**
+ * Remote git URLs only. The ref comes from the dashboard, i.e. from whoever holds this
+ * account's session: a local path or a file:// URL would copy files from elsewhere on this
+ * machine into a skills directory, and a leading "-" would be read by git as an option.
+ */
+export function isAllowedGitRef(ref: string): boolean {
+  return /^(https:\/\/|ssh:\/\/|git@[^\s:/]+:)[^\s]+$/.test(ref) && !ref.startsWith("-");
+}
+
+// Never wait for a username/password prompt: a daemon has no one to answer it, and a private
+// repository should fail at once rather than hang the install queue.
+const GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+
+async function defaultGitClone(ref: string, destDir: string, commit?: string | null): Promise<string> {
+  if (!commit) {
+    await execFileAsync("git", ["clone", "--depth", "1", "--", ref, destDir], { env: GIT_ENV });
+    return destDir;
+  }
+  // A specific commit: fetch just that object (GitHub and most hosts allow fetching a
+  // reachable commit by id) and check it out detached.
+  mkdirSync(destDir, { recursive: true });
+  await execFileAsync("git", ["init", "--quiet", destDir], { env: GIT_ENV });
+  await execFileAsync("git", ["-C", destDir, "remote", "add", "origin", "--", ref], { env: GIT_ENV });
+  await execFileAsync("git", ["-C", destDir, "fetch", "--quiet", "--depth", "1", "origin", commit], { env: GIT_ENV });
+  await execFileAsync("git", ["-C", destDir, "checkout", "--quiet", "--detach", "FETCH_HEAD"], { env: GIT_ENV });
   return destDir;
+}
+
+async function defaultResolveCommit(repoDir: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", repoDir, "rev-parse", "HEAD"], { env: GIT_ENV });
+    const sha = stdout.trim();
+    return COMMIT_SHA.test(sha) ? sha : null;
+  } catch {
+    return null;
+  }
 }
 
 function asMap(value: unknown): Record<string, unknown> {
@@ -115,15 +158,33 @@ export async function installGeneric(
   source: InstallSource,
   target: InstallTarget,
   strategies: InstallStrategies = {}
-): Promise<{ installed: boolean; path?: string; reason?: string }> {
+): Promise<{ installed: boolean; path?: string; reason?: string; commit?: string | null }> {
   if (source.type !== "git") {
     return { installed: false, reason: `source type ${source.type} is not supported yet` };
+  }
+  if (!isAllowedGitRef(source.ref)) {
+    return { installed: false, reason: `${source.ref} is not a remote git URL (https://, ssh:// or git@host:)` };
+  }
+  if (source.commit && !COMMIT_SHA.test(source.commit)) {
+    return { installed: false, reason: `${source.commit} is not a full commit id` };
   }
 
   const tempRoot = mkdtempSync(path.join(os.tmpdir(), "loadout-install-"));
   try {
     const clone = strategies.gitClone ?? defaultGitClone;
-    const repoDir = await clone(source.ref, path.join(tempRoot, repoNameFrom(source.ref)));
+    const repoDir = await clone(source.ref, path.join(tempRoot, repoNameFrom(source.ref)), source.commit ?? null);
+
+    // What is actually on disk now. A pinned install must be exactly the pinned commit —
+    // anything else is code nobody reviewed — so a mismatch, or a checkout whose commit
+    // cannot be read at all, refuses rather than installs.
+    const commit = await (strategies.resolveCommit ?? defaultResolveCommit)(repoDir);
+    if (source.commit && commit !== source.commit) {
+      return {
+        installed: false,
+        reason: `expected commit ${source.commit.slice(0, 12)}, got ${commit ? commit.slice(0, 12) : "an unknown commit"}`
+      };
+    }
+    const pinNote = commit ? ` @ ${commit.slice(0, 12)}` : "";
 
     const resolved = source.subdir ? path.resolve(repoDir, source.subdir) : repoDir;
     const relative = path.relative(repoDir, resolved);
@@ -149,7 +210,7 @@ export async function installGeneric(
         strategies.skipConfirmation === true ||
         (await requestLocalConfirmation({
           id: nextConfirmationId(),
-          description: `Install ${source.ref}${source.subdir ? ` (${source.subdir})` : ""} (${target.scope})`
+          description: `Install ${source.ref}${source.subdir ? ` (${source.subdir})` : ""}${pinNote} (${target.scope})`
         }));
       if (!approved) return { installed: false, reason: "denied" };
 
@@ -162,7 +223,7 @@ export async function installGeneric(
       if (!written.name) {
         return { installed: false, reason: written.reason };
       }
-      return { installed: true, path: written.name };
+      return { installed: true, path: written.name, commit };
     }
 
     if (!skillMd) {
@@ -183,7 +244,7 @@ export async function installGeneric(
       strategies.skipConfirmation === true ||
       (await requestLocalConfirmation({
         id: nextConfirmationId(),
-        description: `Install ${source.ref}${source.subdir ? ` (${source.subdir})` : ""} (${target.scope})`
+        description: `Install ${source.ref}${source.subdir ? ` (${source.subdir})` : ""}${pinNote} (${target.scope})`
       }));
     if (!approved) return { installed: false, reason: "denied" };
 
@@ -197,7 +258,7 @@ export async function installGeneric(
       canonicalPath: destDir,
       projectPath: target.projectPath
     });
-    return { installed: true, path: destDir };
+    return { installed: true, path: destDir, commit };
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }

@@ -13,6 +13,22 @@ export interface LocalConfig {
   // asking again (`loadout trust <minutes>`; 0 disables it). Read once at daemon start into
   // confirm.ts's in-memory trust window — see that module for why it isn't persisted there.
   trustWindowMinutes?: number;
+  // ISO timestamp until which install/restore confirmations are suspended
+  // (`loadout confirm-installs off <minutes>`). Persisted on purpose, so a daemon restart
+  // inside the window does not silently re-arm the prompt — and one after it does. Bounded
+  // by MAX_SUSPEND_MINUTES; there is no "off forever".
+  confirmationsSuspendedUntil?: string | null;
+}
+
+/** The longest confirmation can be suspended for in one go. */
+export const MAX_SUSPEND_MINUTES = 8 * 60;
+
+/** When the current suspension ends, or null if confirmations are on. */
+export function confirmationsSuspendedUntil(cfg: LocalConfig = readLocalConfig(), now: number = Date.now()): Date | null {
+  const until = cfg.confirmationsSuspendedUntil ? Date.parse(cfg.confirmationsSuspendedUntil) : NaN;
+  // A value beyond the cap was not written by this CLI; treat it as not suspended.
+  if (!Number.isFinite(until) || until <= now || until - now > MAX_SUSPEND_MINUTES * 60_000 + 60_000) return null;
+  return new Date(until);
 }
 
 const DEFAULT_CONFIG: LocalConfig = { registeredProjectPaths: [], contentBackupsEnabled: false, trustWindowMinutes: 0 };

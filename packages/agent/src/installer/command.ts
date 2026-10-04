@@ -2,7 +2,7 @@ import path from "node:path";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import type { InstalledItem, RealtimeCommand } from "@loadout/shared";
 import { toInstalledItemRow } from "@loadout/shared";
-import { installGeneric } from "./generic.js";
+import { installGeneric, type InstallStrategies } from "./generic.js";
 import { supabaseConnection } from "../config.js";
 import type { Credentials } from "../localConfig.js";
 import * as log from "../log.js";
@@ -28,6 +28,8 @@ export function installedItemFromInstall(opts: {
   sourceType: InstalledItem["sourceType"];
   sourceRef: string;
   sourceSubdir: string | null;
+  /** The commit the install actually checked out, when known. */
+  sourceCommit?: string | null;
 }): InstalledItem {
   const name = path.basename(opts.outcomePath);
   return {
@@ -53,6 +55,7 @@ export function installedItemFromInstall(opts: {
     sourceType: opts.sourceType,
     sourceRef: opts.sourceRef,
     sourceSubdir: opts.sourceSubdir,
+    sourceCommit: opts.sourceCommit ?? null,
     contentBackupId: null,
     lastSyncedAt: new Date().toISOString()
   };
@@ -84,20 +87,27 @@ export async function recordInstallProvenance(client: SupabaseClient, item: Inst
  */
 export async function applyInstallCommand(
   command: InstallCommand,
-  ctx: { client: SupabaseClient; machineId: string }
-): Promise<void> {
+  ctx: { client: SupabaseClient; machineId: string },
+  strategies: InstallStrategies = {}
+): Promise<{ installed: boolean; reason?: string; commit?: string | null }> {
   // installGeneric's InstallSource.type is "git" | "npm" | "url" (see ./generic.ts), narrower
   // than the command's sourceType ("manual" | "git" | "npm" | "marketplace"). "git"/"npm"
   // pass through; anything else is fetched as a plain URL.
   const sourceType: "git" | "npm" | "url" =
     command.sourceType === "git" || command.sourceType === "npm" ? command.sourceType : "url";
   const outcome = await installGeneric(
-    { type: sourceType, ref: command.sourceRef, subdir: command.sourceSubdir ?? null },
-    { kind: command.kind, scope: command.scope, projectPath: command.projectPath }
+    {
+      type: sourceType,
+      ref: command.sourceRef,
+      subdir: command.sourceSubdir ?? null,
+      commit: command.sourceCommit ?? null
+    },
+    { kind: command.kind, scope: command.scope, projectPath: command.projectPath },
+    strategies
   );
   if (!outcome.installed || !outcome.path) {
     log.info(`install of ${command.sourceRef} did not complete: ${outcome.reason ?? "unknown"}`);
-    return;
+    return { installed: false, reason: outcome.reason ?? "unknown" };
   }
 
   await recordInstallProvenance(
@@ -110,7 +120,8 @@ export async function applyInstallCommand(
       projectPath: command.projectPath,
       sourceType: command.sourceType,
       sourceRef: command.sourceRef,
-      sourceSubdir: command.sourceSubdir ?? null
+      sourceSubdir: command.sourceSubdir ?? null,
+      sourceCommit: outcome.commit ?? null
     })
   );
 
@@ -121,4 +132,5 @@ export async function applyInstallCommand(
     );
     logError(`insert installs row for listing ${command.listingId}`, installsError);
   }
+  return { installed: true, commit: outcome.commit ?? null };
 }

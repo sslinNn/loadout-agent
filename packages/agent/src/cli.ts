@@ -2,31 +2,32 @@ import os from "node:os";
 import path from "node:path";
 import { Command } from "commander";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import type { InstalledItem, RealtimeCommand, Snapshot } from "@loadout/shared";
-import { toInstalledItem, toInstalledItemRow } from "@loadout/shared";
-import { readLocalConfig, writeLocalConfig, writeCredentials, readCredentials } from "./localConfig.js";
+import type { Snapshot } from "@loadout/shared";
+import { toInstalledItemRow } from "@loadout/shared";
+import {
+  readLocalConfig,
+  writeLocalConfig,
+  writeCredentials,
+  readCredentials,
+  confirmationsSuspendedUntil,
+  MAX_SUSPEND_MINUTES
+} from "./localConfig.js";
 import { requestPairingCode, pairAndRegisterMachine } from "./pairing.js";
 import { supabaseConnection } from "./config.js";
-import { approvePending, configureTrustWindow, denyPending, isSocketLive } from "./installer/confirm.js";
-import { restoreSnapshot } from "./installer/restore.js";
+import { approvePending, configureTrustWindow, denyPending, isSocketLive, listPending } from "./installer/confirm.js";
 import { installGeneric } from "./installer/generic.js";
-import {
-  applyInstallCommand,
-  clientFromStoredAccessToken,
-  installedItemFromInstall,
-  recordInstallProvenance
-} from "./installer/command.js";
+import { clientFromStoredAccessToken, installedItemFromInstall, recordInstallProvenance } from "./installer/command.js";
+import { createSerialRunner, executeCommand } from "./commandRunner.js";
+import { startCommandQueue } from "./queue.js";
 import { createRealtimeClient } from "./realtime/client.js";
 import { subscribeCommands } from "./realtime/commands.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { startWatcher } from "./watcher.js";
 import { buildSnapshot } from "./scanners/snapshot.js";
-import { captureContentBackup, backupContentFor } from "./contentBackup.js";
 import { readPackageVersion } from "./version.js";
 import { startUpgradeWatch } from "./upgradeWatch.js";
 import { installService, uninstallService, serviceStatus } from "./service/index.js";
 import * as log from "./log.js";
-import { applyToggle, removeItem } from "./mutators/dispatch.js";
 
 // Row mappers (snake_case PostgREST ↔ camelCase InstalledItem) live in @loadout/shared.
 
@@ -130,7 +131,9 @@ export async function upsertSnapshot(client: SupabaseClient, snapshot: Snapshot)
       continue;
     }
     if (diskStateMatches(existing, row)) continue;
-    const { source_type, source_ref, source_subdir, content_backup_id, ...diskObservable } = row;
+    // Provenance (including the installed commit) is write-once: the scanners report it as
+    // null, and writing that back would erase what the install recorded.
+    const { source_type, source_ref, source_subdir, source_commit, content_backup_id, ...diskObservable } = row;
     const { error } = await client
       .from("installed_items")
       .update(diskObservable)
@@ -172,30 +175,12 @@ export async function upsertSnapshot(client: SupabaseClient, snapshot: Snapshot)
   reportSync({ added, changed, removed });
 }
 
-// Best-effort content backup of a manual item, taken immediately before an irreversible
-// removal. Opt-in per the plan's Global Constraint ("Content backups ... are opt-in") —
-// gated on ~/.loadout/config.json's `contentBackupsEnabled`, toggled by
-// `loadout-agent content-backups on|off`. Only ever runs for source_type "manual" items,
-// which are precisely the ones that have no source to re-install from.
-async function maybeCaptureContentBackup(client: SupabaseClient, item: InstalledItem): Promise<void> {
-  if (!readLocalConfig().contentBackupsEnabled) return;
-  if (item.sourceType !== "manual") return;
-
-  const content = backupContentFor(item);
-  if (content === null) {
-    log.warn(`content backup skipped for ${item.name}: nothing to capture`);
-    return;
-  }
-
-  try {
-    const { fields } = await captureContentBackup(client, item, content);
-    log.info(
-      `content backup captured for ${item.name}` +
-        (fields.length ? ` (redacted ${fields.length} possible secret field(s); redaction is best-effort)` : "")
-    );
-  } catch (err) {
-    logError(`content backup for ${item.name}`, err);
-  }
+/** One line answering "is this machine currently unguarded?" */
+function describeSuspension(): string {
+  const until = confirmationsSuspendedUntil();
+  if (!until) return "Confirmations: on (dashboard installs and restores ask first).";
+  const minutes = Math.ceil((until.getTime() - Date.now()) / 60_000);
+  return `Confirmations: OFF for another ${minutes} min (until ${until.toLocaleTimeString()}). 'loadout confirm-installs on' ends it now.`;
 }
 
 export function buildCli(): Command {
@@ -253,6 +238,38 @@ export function buildCli(): Command {
     });
 
   program
+    .command("confirm-installs [state] [minutes]")
+    .description(
+      `suspend local confirmation of dashboard installs and restores for a while ('off <minutes>', at most ${MAX_SUSPEND_MINUTES}), turn it back on ('on'), or show its state`
+    )
+    .action((state: string | undefined, minutes: string | undefined) => {
+      const cfg = readLocalConfig();
+      if (state === undefined) {
+        console.log(describeSuspension());
+        return;
+      }
+      if (state === "on") {
+        writeLocalConfig({ ...cfg, confirmationsSuspendedUntil: null });
+        console.log("Confirmations are on: every dashboard install and restore asks first.");
+        return;
+      }
+      const length = Number(minutes);
+      if (state !== "off" || !minutes || !Number.isInteger(length) || length <= 0 || length > MAX_SUSPEND_MINUTES) {
+        console.error(`Expected 'on', or 'off <minutes>' with 1–${MAX_SUSPEND_MINUTES} minutes. There is no permanent off.`);
+        process.exitCode = 1;
+        return;
+      }
+      const until = new Date(Date.now() + length * 60_000);
+      writeLocalConfig({ ...cfg, confirmationsSuspendedUntil: until.toISOString() });
+      console.log(
+        `Confirmations are OFF until ${until.toLocaleTimeString()} (${length} min).\n` +
+          "Until then, anything installed from the dashboard — including by someone holding your\n" +
+          "session — lands in your agent's skills and MCP configs without asking you.\n" +
+          "They come back on by themselves; 'loadout confirm-installs on' ends it now."
+      );
+    });
+
+  program
     .command("pair")
     .description("pair this machine with your Loadout account")
     .action(async () => {
@@ -298,30 +315,61 @@ export function buildCli(): Command {
     });
 
   program
-    .command("approve <id>")
-    .description("approve a pending locally-confirmed action (e.g. an install requested by the running daemon)")
-    .action(async (id: string) => {
+    .command("pending")
+    .description("list actions waiting for your approval on this machine")
+    .action(async () => {
       try {
-        await approvePending(id);
-        console.log(`Approved ${id}`);
+        const waiting = await listPending();
+        if (waiting.length === 0) {
+          console.log("Nothing is waiting for approval.");
+          return;
+        }
+        for (const action of waiting) console.log(`  ${action.id}  ${action.description}`);
+        console.log(waiting.length === 1 ? "Approve it with 'loadout approve'." : "Approve one with 'loadout approve <id>'.");
       } catch (err) {
         console.error(`Could not reach the running loadout daemon: ${(err as Error).message}`);
         process.exitCode = 1;
       }
     });
 
-  program
-    .command("deny <id>")
-    .description("deny a pending locally-confirmed action")
-    .action(async (id: string) => {
-      try {
-        await denyPending(id);
-        console.log(`Denied ${id}`);
-      } catch (err) {
-        console.error(`Could not reach the running loadout daemon: ${(err as Error).message}`);
-        process.exitCode = 1;
+  // `approve` / `deny` with no id act on the single pending action — the common case, where
+  // retyping an identifier out of a notification was the whole cost of approving.
+  async function decide(id: string | undefined, approved: boolean): Promise<void> {
+    const verb = approved ? "approve" : "deny";
+    try {
+      let target = id;
+      if (!target) {
+        const waiting = await listPending();
+        if (waiting.length === 0) {
+          console.log("Nothing is waiting for approval.");
+          return;
+        }
+        if (waiting.length > 1) {
+          console.error(`${waiting.length} actions are waiting — say which one:`);
+          for (const action of waiting) console.error(`  loadout ${verb} ${action.id}   # ${action.description}`);
+          process.exitCode = 1;
+          return;
+        }
+        target = waiting[0].id;
+        console.log(waiting[0].description);
       }
-    });
+      await (approved ? approvePending(target) : denyPending(target));
+      console.log(`${approved ? "Approved" : "Denied"} ${target}`);
+    } catch (err) {
+      console.error(`Could not reach the running loadout daemon: ${(err as Error).message}`);
+      process.exitCode = 1;
+    }
+  }
+
+  program
+    .command("approve [id]")
+    .description("approve a pending action (the only one, when there is just one)")
+    .action((id: string | undefined) => decide(id, true));
+
+  program
+    .command("deny [id]")
+    .description("deny a pending action (the only one, when there is just one)")
+    .action((id: string | undefined) => decide(id, false));
 
   program
     .command("install <git-url> [subdir]")
@@ -329,7 +377,8 @@ export function buildCli(): Command {
       "install a skill from a git repository onto this machine without the dashboard (the path holding SKILL.md, when it is not the repository root)"
     )
     .option("--project <path>", "install project-scoped into this project instead of globally into your home directory")
-    .action(async (gitUrl: string, subdir: string | undefined, opts: { project?: string }) => {
+    .option("--commit <sha>", "check out exactly this commit (40 hex characters) instead of the default branch")
+    .action(async (gitUrl: string, subdir: string | undefined, opts: { project?: string; commit?: string }) => {
       const scope = opts.project ? "project" : "global";
       if (scope === "project" && !path.isAbsolute(opts.project!)) {
         console.error("--project expects an absolute path.");
@@ -340,7 +389,7 @@ export function buildCli(): Command {
       // requestLocalConfirmation would bind the running daemon's ~/.loadout/confirm.sock
       // (EADDRINUSE) and re-ask a question they already answered.
       const outcome = await installGeneric(
-        { type: "git", ref: gitUrl, subdir: subdir ?? null },
+        { type: "git", ref: gitUrl, subdir: subdir ?? null, commit: opts.commit ?? null },
         { kind: "skill", scope, projectPath: opts.project ?? null },
         { skipConfirmation: true }
       );
@@ -366,7 +415,8 @@ export function buildCli(): Command {
               projectPath: opts.project ?? null,
               sourceType: "git",
               sourceRef: gitUrl,
-              sourceSubdir: subdir ?? null
+              sourceSubdir: subdir ?? null,
+              sourceCommit: outcome.commit ?? null
             })
           );
         } catch (err) {
@@ -456,67 +506,26 @@ export function buildCli(): Command {
       startWatcher({ machineId: creds.machineId, homeDir: os.homedir(), onSnapshot: syncSnapshot });
       await upsertSnapshot(client, buildSnapshot({ machineId: creds.machineId, homeDir: os.homedir() }));
 
-      async function handleCommand(command: RealtimeCommand): Promise<void> {
-        // `installed_items` is keyed on (machine_id, id): the scanner-derived id is
-        // path-based and so is NOT unique across a user's machines. Every lookup and write
-        // below therefore pins machine_id to THIS machine — without it, a command naming an
-        // id that also exists on a sibling machine could read, mutate or delete that other
-        // machine's row.
-        if (command.type === "toggle") {
-          const { data: row, error } = await client
-            .from("installed_items")
-            .select("*")
-            .eq("machine_id", creds!.machineId)
-            .eq("id", command.itemId)
-            .single();
-          logError(`select installed_items ${command.itemId}`, error);
-          if (!row) return;
-          const item = toInstalledItem(row);
-          applyToggle(item, command.enabled);
-        } else if (command.type === "remove") {
-          const { data: row, error } = await client
-            .from("installed_items")
-            .select("*")
-            .eq("machine_id", creds!.machineId)
-            .eq("id", command.itemId)
-            .single();
-          logError(`select installed_items ${command.itemId}`, error);
-          if (!row) return;
-          const item = toInstalledItem(row);
-          await maybeCaptureContentBackup(client, item);
-          removeItem(item);
-          const { error: deleteError } = await client
-            .from("installed_items")
-            .delete()
-            .eq("machine_id", creds!.machineId)
-            .eq("id", command.itemId);
-          logError(`delete installed_items ${command.itemId}`, deleteError);
-        } else if (command.type === "restore") {
-          const results = await restoreSnapshot(command.items);
-          const { error } = await client.from("restore_results").insert(
-            results.map((r) => ({
-              machine_id: creds!.machineId,
-              item_name: r.item.name,
-              installed: r.installed,
-              reason: r.reason ?? null
-            }))
-          );
-          logError("insert restore_results", error);
-        } else if (command.type === "install") {
-          await applyInstallCommand(command, { client, machineId: creds!.machineId });
-        }
-      }
+      // One runner for both paths, so a broadcast and a queued command never run at once.
+      const serialize = createSerialRunner();
+      const ctx = { client, machineId: creds.machineId };
 
+      // Agents from 0.2.0 drain machine_commands: commands the dashboard queued while this
+      // machine was offline, with their status reported back (including "awaiting approval").
+      const queue = startCommandQueue({
+        client,
+        machineId: creds.machineId,
+        execute: (command) => executeCommand(command, ctx),
+        serialize
+      });
+      process.once("SIGTERM", () => void queue.stop());
+      process.once("SIGINT", () => void queue.stop());
+
+      // Broadcasts still work: an older dashboard, or the `loadout` CLI, sends them.
       subscribeCommands(client, creds.machineId, {
         onCommand: async (command) => {
-          // One bad command must never take the daemon down. subscribeCommands invokes this
-          // handler as a floating promise, and an unhandled rejection terminates the Node
-          // process by default (>= 15) — so everything below is caught and logged here.
-          try {
-            await handleCommand(command);
-          } catch (err) {
-            logError(`command ${command.type}`, err);
-          }
+          const outcome = await serialize(() => executeCommand(command, ctx));
+          if (outcome.status !== "done") log.info(`command ${command.type}: ${outcome.status}${outcome.detail ? ` (${outcome.detail})` : ""}`);
         }
       });
     });
@@ -559,6 +568,7 @@ export function buildCli(): Command {
     .description("show whether the background service is installed and running")
     .action(async () => {
       console.log(await serviceStatus());
+      console.log(describeSuspension());
     });
 
   return program;

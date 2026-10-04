@@ -2,7 +2,23 @@ import os from "node:os";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { readPackageVersion } from "./version.js";
 
+/** What this machine says about itself when it asks for a code — shown on /pair before anyone confirms. */
+export function machineIdentity(): { hostname: string; os: string } {
+  return { hostname: os.hostname(), os: `${os.type()} ${os.release()} (${process.arch})` };
+}
+
+/**
+ * Ask for a pairing code, saying which machine is asking. The dashboard shows the hostname
+ * and OS next to the code before anyone confirms it, so a code that arrived in someone
+ * else's link does not hand over an account to a machine nobody saw.
+ *
+ * A deployment that predates request_pairing_code(hostname, os) answers PGRST202 (no such
+ * function signature); that one gets the old zero-argument call.
+ */
 export async function requestPairingCode(client: SupabaseClient): Promise<{ code: string }> {
+  const first = await client.rpc("request_pairing_code", machineIdentity());
+  if (!first.error) return { code: first.data.code };
+  if (first.error.code !== "PGRST202") throw first.error;
   const { data, error } = await client.rpc("request_pairing_code");
   if (error) throw error;
   return { code: data.code };

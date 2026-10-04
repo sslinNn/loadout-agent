@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import * as log from "../log.js";
 import { promptWithButtons } from "./prompt.js";
+import { confirmationsSuspendedUntil } from "../localConfig.js";
 
 export interface ConfirmAction {
   id: string;
@@ -49,6 +50,12 @@ export function defaultSocketPath(): string {
 // `loadout-agent approve/deny` process connecting over the socket).
 const pending = new Map<string, (approved: boolean) => void>();
 
+/** What each pending confirmation would do, for `loadout pending` and a bare `loadout approve`. */
+export interface PendingAction extends ConfirmAction {
+  requestedAt: string;
+}
+const pendingActions = new Map<string, PendingAction>();
+
 // Disposers returned by promptWithButtons, keyed the same as `pending`. Torn down from
 // resolvePendingId so that answering in the terminal — or the timeout below expiring —
 // closes a dialog/notification still sitting on screen instead of leaving it orphaned.
@@ -63,6 +70,38 @@ let serverStartPromise: Promise<Server> | null = null;
 // length, set once at daemon start; `trustedUntil` is the timestamp an approval last extended.
 let trustWindowMinutes = 0;
 let trustedUntil = 0;
+
+// `loadout confirm-installs off <minutes>`: read from ~/.loadout/config.json on every request,
+// so turning it off (or back on) takes effect without restarting the daemon. Unlike the trust
+// window it is persisted — a restart inside the window must not quietly re-arm it, and one
+// after the window must — and it is always bounded (MAX_SUSPEND_MINUTES). Whatever can write
+// that file can already write ~/.claude directly, so the file grants nothing new.
+let suspensionSource: () => Date | null = () => confirmationsSuspendedUntil();
+
+/** Test-only: replace where the suspension window is read from. */
+export function setSuspensionSourceForTests(source: () => Date | null): void {
+  suspensionSource = source;
+}
+
+/**
+ * Told when a confirmation starts waiting for a person and when it is answered. The command
+ * queue uses it to report "awaiting approval" back to the dashboard, which otherwise showed
+ * a finished-looking install while the machine sat waiting for someone to click Install.
+ */
+export type ConfirmationListener = (event: { phase: "waiting" | "resolved"; action: ConfirmAction; approved?: boolean }) => void;
+let confirmationListener: ConfirmationListener | null = null;
+
+export function setConfirmationListener(listener: ConfirmationListener | null): void {
+  confirmationListener = listener;
+}
+
+function notify(event: Parameters<ConfirmationListener>[0]): void {
+  try {
+    confirmationListener?.(event);
+  } catch (err) {
+    log.error("confirmation listener failed", err);
+  }
+}
 
 /** Called from the `run` command at daemon start, with the value read out of local config. */
 export function configureTrustWindow(minutes: number): void {
@@ -105,15 +144,20 @@ function handleConnection(socket: Socket): void {
     buffer += chunk;
   });
   socket.on("end", () => {
+    let reply = "";
     try {
-      const message = JSON.parse(buffer) as { id?: unknown; approved?: unknown };
-      if (typeof message.id === "string" && typeof message.approved === "boolean") {
+      const message = JSON.parse(buffer) as { type?: unknown; id?: unknown; approved?: unknown };
+      if (message.type === "list") {
+        // A separate `loadout pending` / bare `loadout approve` process cannot see this
+        // daemon's memory, so it asks over the socket.
+        reply = JSON.stringify({ pending: [...pendingActions.values()] });
+      } else if (typeof message.id === "string" && typeof message.approved === "boolean") {
         resolvePendingId(message.id, message.approved);
       }
     } catch {
       // Ignore malformed messages rather than crashing the daemon.
     }
-    socket.end();
+    socket.end(reply);
   });
   socket.on("error", () => {
     // A disconnecting client can produce transport errors (e.g. ECONNRESET);
@@ -263,21 +307,33 @@ export async function requestLocalConfirmation(
     return true;
   }
 
+  const suspendedUntil = suspensionSource();
+  if (suspendedUntil) {
+    log.warn(`confirmations suspended until ${suspendedUntil.toISOString()}; approving without asking: ${action.description}`);
+    return true;
+  }
+
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   return new Promise((resolve) => {
     const timeout = setTimeout(() => {
       pending.delete(action.id);
+      pendingActions.delete(action.id);
       disposePrompt(action.id);
+      notify({ phase: "resolved", action, approved: false });
       resolve(false);
     }, timeoutMs);
     if (typeof timeout.unref === "function") timeout.unref();
 
+    pendingActions.set(action.id, { ...action, requestedAt: new Date().toISOString() });
     pending.set(action.id, (approved) => {
       clearTimeout(timeout);
+      pendingActions.delete(action.id);
       log.info(`${approved ? "approved" : "denied"}: ${action.id}`);
+      notify({ phase: "resolved", action, approved });
       resolve(approved);
     });
+    notify({ phase: "waiting", action });
 
     // The desktop prompt is a convenience, not the channel. It is absent on a headless
     // machine and suppressed under do-not-disturb, and without this line the daemon looks
@@ -292,6 +348,29 @@ export async function requestLocalConfirmation(
       action.id,
       promptWithButtons(action, (approved) => resolvePendingId(action.id, approved), { timeoutMs })
     );
+  });
+}
+
+/** Ask the running daemon what is waiting for approval. */
+export function listPending(socketPath: string = defaultSocketPath()): Promise<PendingAction[]> {
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection(socketPath);
+    let response = "";
+    socket.setEncoding("utf8");
+    socket.once("connect", () => socket.end(JSON.stringify({ type: "list" })));
+    socket.on("data", (chunk) => {
+      response += chunk;
+    });
+    socket.once("close", () => {
+      try {
+        const parsed = JSON.parse(response) as { pending?: PendingAction[] };
+        resolve(Array.isArray(parsed.pending) ? parsed.pending : []);
+      } catch {
+        // A daemon from before `list` existed answers nothing.
+        reject(new Error("the running daemon does not support listing pending actions; restart it after upgrading"));
+      }
+    });
+    socket.once("error", (err) => reject(err));
   });
 }
 
