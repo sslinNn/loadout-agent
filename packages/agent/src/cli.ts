@@ -19,6 +19,7 @@ import { installGeneric } from "./installer/generic.js";
 import { clientFromStoredAccessToken, installedItemFromInstall, recordInstallProvenance } from "./installer/command.js";
 import { createSerialRunner, executeCommand } from "./commandRunner.js";
 import { startCommandQueue } from "./queue.js";
+import { scopeSessionToMachine } from "./machineSession.js";
 import { createRealtimeClient } from "./realtime/client.js";
 import { subscribeCommands } from "./realtime/commands.js";
 import { startHeartbeat } from "./heartbeat.js";
@@ -298,6 +299,9 @@ export function buildCli(): Command {
         process.exitCode = 1;
         return;
       }
+      // Narrow the account session pairing produced to this machine (refreshes it when the
+      // project's access token hook is on), BEFORE it is written to disk.
+      const scope = await scopeSessionToMachine(client, result.machineId);
       const session = await client.auth.getSession();
       writeCredentials({
         accessToken: session.data.session!.access_token,
@@ -307,6 +311,9 @@ export function buildCli(): Command {
       });
       // Which of the two happened is worth saying: "reconnected" is the difference between
       // the inventory you already had and a machine starting from nothing.
+      if (scope === "scoped") console.log("This machine's credential can only act on this machine.");
+      else if (scope === "pending_hook")
+        console.log("Registered this machine's credential; it becomes machine-scoped once the dashboard's access token hook is enabled.");
       console.log(
         result.reconnected
           ? `Reconnected as machine ${result.machineId}, keeping its existing inventory. Run 'loadout run' to start the daemon.`
@@ -476,6 +483,19 @@ export function buildCli(): Command {
         process.exitCode = 1;
         return;
       }
+
+      // Agents paired before 0.3.0 hold an account-wide session: scope it to this machine now,
+      // once, before any channel is joined with the old token.
+      const scope = await scopeSessionToMachine(client, creds.machineId);
+      if (scope === "revoked") {
+        console.error(
+          "This machine was removed from your loadout fleet, so its credential no longer works.\n" +
+            "Run 'loadout pair' to pair it again."
+        );
+        process.exitCode = 1;
+        return;
+      }
+      if (scope === "scoped") log.info("credential scoped to this machine");
 
       const heartbeat = startHeartbeat(client, creds.machineId);
       // Only ever exits when --supervised was passed (see the flag's own comment above);

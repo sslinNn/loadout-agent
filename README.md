@@ -37,3 +37,11 @@ npm Trusted Publisher for this package must point at **this** repository (not th
 `installed_items.source_commit`, `machine_commands`). Against an older deployment pairing
 falls back to the old call, but installs fail to record their commit — apply the
 migrations first.
+
+### 0.3.0: machine-scoped credentials
+
+Pairing (and the first `loadout run` after upgrading) registers the agent's session against
+its machine (`register_machine_session`, dashboard migration `20261004120000`). Once the
+project's custom access token hook is enabled, the agent's tokens carry `machine_id` and can
+only act on this machine's rows; forgetting the machine in the dashboard revokes them.
+Without the hook nothing changes.
